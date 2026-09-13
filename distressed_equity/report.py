@@ -34,7 +34,31 @@ def render_markdown(case: CaseInput, result: CaseResult) -> str:
     lines.append(f"- 입력된 현실적 성공확률 범위: **{_pct(low)} ~ {_pct(high)}**")
     lines.append(f"- Critical assumptions: **{base.critical_assumption_count}개**")
     lines.append(f"- Common Equity Capture Ratio: **{_num(result.common_equity_capture_ratio)}**")
+    if result.pre_recovery_refinancing:
+        lines.append(f"- Recovery 전 refinancing: **{', '.join(result.pre_recovery_refinancing)}**")
+    if result.pre_recovery_covenants:
+        lines.append(f"- Recovery 전 covenant risk: **{', '.join(result.pre_recovery_covenants)}**")
     lines.append("")
+
+    if case.debt_obligations or case.covenants:
+        lines.append("## Recovery 전 자본구조 장벽")
+        lines.append("")
+        if case.debt_obligations:
+            lines.append("| 의무 | 금액 | 월 | 현금지급 | 재융자 필요 |")
+            lines.append("|---|---:|---:|---|---|")
+            for item in case.debt_obligations:
+                lines.append(
+                    f"| {item.name} | {item.amount:,.0f} | {item.due_month} | "
+                    f"{item.cash_payment_required} | {item.refinancing_required} |"
+                )
+            lines.append("")
+        if case.covenants:
+            for covenant in case.covenants:
+                lines.append(
+                    f"- {covenant.name}: breach month if unremedied={covenant.breach_month_if_unremedied}, "
+                    f"cure_available={covenant.cure_available}"
+                )
+            lines.append("")
 
     lines.append("## 시나리오")
     lines.append("")
@@ -75,6 +99,7 @@ def render_markdown(case: CaseInput, result: CaseResult) -> str:
     lines.append("- Required Probability는 예측값이 아니라 **현재 가격이 요구하는 허들**이다.")
     lines.append("- 현실적 성공확률 범위는 별도 조사 결과로 입력하며, 엔진이 임의 생성하지 않는다.")
     lines.append("- 회사 생존과 기존 common equity 생존을 분리한다.")
+    lines.append("- recovery 전에 refinancing/covenant가 있으면 성공을 자동 가정하지 않고 `REVIEW`로 남긴다.")
     lines.append("- 증자대금은 생존에 도움을 주지만 신규주식 발행으로 기존주주 몫을 희석한다.")
     lines.append("- lease/SBC/기타 준부채는 현금흐름과 EV bridge에서 이중계산하지 않는다.")
     return "\n".join(lines) + "\n"
