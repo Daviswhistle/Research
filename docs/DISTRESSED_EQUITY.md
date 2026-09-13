@@ -23,6 +23,8 @@ Carvana 2022의 업종·주가하락률 같은 표면적 특징을 복제하지 
 - Critical Assumption 수
 - recovery 전 cash debt payment의 liquidity impact
 - recovery 전 refinancing/covenant blocker의 존재
+- point-in-time price drawdown 후보 생성
+- base-rate 결과의 cutoff-date eligibility
 
 에이전트가 맡는 것:
 
@@ -185,7 +187,88 @@ Universe scanner는 `build_screening_tasks()`로 **미해결 gate만** 조사한
 
 `distressed_equity.evidence.EvidenceRecord`는 주장별 공개일과 event date를 기록한다. `validate_point_in_time()`은 분석일 뒤 공개된 자료가 historical replay에 섞이면 violation을 반환한다.
 
-이 레이어는 현재 최소 구현이다. 향후 SEC/DART/IR/채권 데이터 수집기가 evidence ledger를 채우도록 확장한다.
+현재 SEC 공식 `submissions`와 XBRL `companyfacts` collector가 이 ledger를 채우고, cutoff 이후 filing/fact를 거부한다. 자세한 내용은 [`SEC_EVIDENCE.md`](SEC_EVIDENCE.md)를 참고한다.
+
+## Survivorship-aware market replay
+
+현재 살아 있는 종목만 과거로 되감으면 실제로 실패한 기업들이 universe에서 사라진다. 이를 막기 위해 market/universe layer를 별도로 둔다.
+
+`HistoricalMarketProvider`는 다음 인터페이스를 가진다.
+
+```text
+universe(as_of)
+price_on_or_before(security, as_of)
+adjusted_history(security, start, end)
+```
+
+현재 구현:
+
+- `AlphaVantageProvider`: historical `LISTING_STATUS` + raw daily + weekly adjusted, 소규모 replay
+- `CsvMarketProvider`: permanent security ID 기반 bulk export, 전체시장/장기 replay
+
+raw price와 adjusted price를 분리한다.
+
+```text
+raw cutoff close → 실제 cutoff market cap
+adjusted price path → split/dividend-safe drawdown 후보 생성
+```
+
+Adjusted drawdown은 후보 생성용 proxy이며 최종 peak-market-cap/EV distress gate를 자동 통과시키지 않는다.
+
+실행:
+
+```bash
+export ALPHA_VANTAGE_API_KEY="..."
+
+distressed-equity-replay \
+  --provider alpha-vantage \
+  --analysis-date 2022-12-31 \
+  --symbols CVNA,UPST,OPEN \
+  -o output/replay.json
+```
+
+대규모 bulk replay:
+
+```bash
+distressed-equity-replay \
+  --provider csv \
+  --analysis-date 2022-12-31 \
+  --securities-csv data/security_master.csv \
+  --prices-csv data/prices.csv \
+  -o output/replay.json
+```
+
+자세한 설계와 CRSP 매핑 원칙은 [`MARKET_REPLAY.md`](MARKET_REPLAY.md)를 참고한다.
+
+## Point-in-time base-rate library
+
+`BaseRateLibrary`는 성공확률을 대신 계산하지 않는다. 과거 사례의 빈도를 probability-range calibration의 anchor로 제공한다.
+
+각 사례는 다음 두 날짜를 가진다.
+
+```text
+analysis_date
+outcome_known_date
+```
+
+Historical replay cutoff보다 늦게 결과가 알려진 사례는 base-rate 계산에서 제외된다. 평가 중인 동일 사례도 `exclude_case_ids`로 제외할 수 있다.
+
+예:
+
+```bash
+distressed-equity-base-rates cases.jsonl \
+  --cutoff 2022-12-31 \
+  --impairment-type cyclical \
+  --leverage-bucket high
+```
+
+출력은 matched case count와 함께 다음 비율을 별도 denominator로 계산한다.
+
+- 12개월 회사 생존율
+- 12개월 기존 common 생존율
+- 3년 내 정상화율
+- 3년 내 3배 이상 비율
+- 3년 equity multiple 중앙값
 
 ## 입력
 
@@ -254,11 +337,30 @@ Universe:
 
 이 판정은 매수·매도 신호가 아니라 연구 우선순위다.
 
+## 현재 구현 상태
+
+구현 완료:
+
+1. deterministic single-case valuation
+2. debt maturity / covenant survival schema
+3. universe research gates
+4. agent task manifest
+5. evidence ledger + point-in-time validation
+6. SEC submissions/companyfacts collector
+7. SEC → safe incomplete screening prefill
+8. historical market provider abstraction
+9. historical active/delisted universe adapter
+10. bulk permanent-ID CSV replay provider
+11. split-safe price-distress replay harness
+12. point-in-time base-rate library
+
 ## 다음 단계
 
-1. SEC/DART/회사 IR/채권가격 수집기를 evidence ledger에 연결
-2. unit economics template을 업종별 adapter로 분리
-3. 과거 distress 사례를 point-in-time으로 재생하는 base-rate 라이브러리 구축
-4. agent 결과를 구조화 JSON으로 받아 evidence ledger와 probability range proposal을 자동 생성
-5. 실제 글로벌 universe 데이터 provider를 연결해 `screen → evidence → deep dive → memo`를 완전 자동화
-6. historical replay에서 look-ahead contamination과 survivorship bias를 검사하는 백테스트 harness 추가
+1. agent 결과를 구조화 JSON으로 받아 evidence ledger와 screening draft에 검증 후 반영
+2. debt footnote/covenant를 filing 원문에서 구조화 추출하는 adapter
+3. unit economics template을 업종별 adapter로 분리
+4. bond price/yield history provider 연결
+5. 실제 CRSP 또는 동급 bulk dataset을 이용한 대규모 historical replay
+6. delisting return까지 포함한 forward outcome evaluator
+7. base-rate case library를 실제 역사사례로 축적
+8. `market replay → SEC packet → agent research → screening → full case → memo` orchestration CLI 완성
