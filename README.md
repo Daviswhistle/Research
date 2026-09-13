@@ -126,7 +126,7 @@ distressed-equity-sec \
 
 현재 살아 있는 종목만 과거로 되감는 오류를 피하기 위해 point-in-time market/universe 계층을 별도로 둡니다.
 
-소규모 역사검증은 Alpha Vantage의 historical `LISTING_STATUS`, raw daily price, weekly adjusted price를 사용합니다.
+소규모 역사검증은 Alpha Vantage의 historical `LISTING_STATUS`, raw daily price, weekly adjusted price를 사용합니다. 종목별 가격 호출이 필요한 provider이므로 기본적으로 전체시장 bulk replay를 허용하지 않습니다.
 
 ```bash
 export ALPHA_VANTAGE_API_KEY="..."
@@ -140,7 +140,7 @@ distressed-equity-replay \
   -o output/replay.json
 ```
 
-전체시장/장기 replay는 permanent security ID를 가진 bulk export를 권장합니다.
+전체시장/장기 replay는 permanent security ID를 가진 bulk export를 권장합니다. CRSP를 사용할 경우 PERMNO를 `security_id`로 정규화해 넣을 수 있습니다.
 
 ```bash
 distressed-equity-replay \
