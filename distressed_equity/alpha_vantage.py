@@ -19,7 +19,10 @@ ALPHA_VANTAGE_URL = "https://www.alphavantage.co/query"
 def _parse_date(value: str | None) -> date | None:
     if not value:
         return None
-    return date.fromisoformat(value[:10])
+    text = value.strip()
+    if not text or text.lower() in {"null", "none", "n/a", "na"}:
+        return None
+    return date.fromisoformat(text[:10])
 
 
 def _float(value: str | None) -> float | None:
