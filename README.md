@@ -122,7 +122,55 @@ distressed-equity-sec \
 - SEC ticker/CIK 매핑은 검색 편의를 위한 자료이므로 CIK와 회사명을 결과에 함께 남깁니다.
 - 자동접근은 SEC fair-access 정책을 지켜야 하므로 클라이언트는 식별 가능한 User-Agent를 요구하고 10 req/s보다 느리게 제한합니다.
 
-자세한 설계는 [`docs/DISTRESSED_EQUITY.md`](docs/DISTRESSED_EQUITY.md)를 참고하세요.
+### Survivorship-aware historical market replay
+
+현재 살아 있는 종목만 과거로 되감는 오류를 피하기 위해 point-in-time market/universe 계층을 별도로 둡니다.
+
+소규모 역사검증은 Alpha Vantage의 historical `LISTING_STATUS`, raw daily price, weekly adjusted price를 사용합니다.
+
+```bash
+export ALPHA_VANTAGE_API_KEY="..."
+
+distressed-equity-replay \
+  --provider alpha-vantage \
+  --analysis-date 2022-12-31 \
+  --symbols CVNA,UPST,OPEN \
+  --min-drawdown 0.60 \
+  --markdown-output output/replay.md \
+  -o output/replay.json
+```
+
+전체시장/장기 replay는 permanent security ID를 가진 bulk export를 권장합니다.
+
+```bash
+distressed-equity-replay \
+  --provider csv \
+  --analysis-date 2022-12-31 \
+  --securities-csv data/security_master.csv \
+  --prices-csv data/prices.csv \
+  -o output/replay.json
+```
+
+raw price는 cutoff market-cap 재구성에, adjusted price는 split 때문에 생기는 가짜 drawdown을 막는 후보 생성용으로 분리합니다. 이 price drawdown은 최종 peak-market-cap/EV distress gate를 대체하지 않습니다.
+
+### Point-in-time base rates
+
+과거 distress 사례의 결과를 확률 anchor로 쓸 때도 look-ahead를 막습니다.
+
+```bash
+distressed-equity-base-rates cases.jsonl \
+  --cutoff 2022-12-31 \
+  --impairment-type cyclical \
+  --leverage-bucket high
+```
+
+각 사례에는 `analysis_date`뿐 아니라 `outcome_known_date`를 저장합니다. cutoff 이후에야 결과가 알려진 사례는 당시 base rate에 들어갈 수 없고, 현재 평가 중인 동일 사례도 제외할 수 있습니다.
+
+자세한 설계:
+
+- [`docs/DISTRESSED_EQUITY.md`](docs/DISTRESSED_EQUITY.md)
+- [`docs/SEC_EVIDENCE.md`](docs/SEC_EVIDENCE.md)
+- [`docs/MARKET_REPLAY.md`](docs/MARKET_REPLAY.md)
 
 ### 테스트
 
