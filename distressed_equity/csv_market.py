@@ -73,9 +73,9 @@ class CsvMarketProvider:
 
     def _load_prices(
         self,
-    ) -> tuple[dict[str, tuple[PricePoint, ...]], dict[tuple[str, date], PricePoint]]:
-        buckets: dict[str, list[PricePoint]] = {}
-        raw_prices: dict[tuple[str, date], PricePoint] = {}
+    ) -> tuple[dict[str, tuple[PricePoint, ...]], dict[str, tuple[PricePoint, ...]]]:
+        adjusted_buckets: dict[str, list[PricePoint]] = {}
+        raw_buckets: dict[str, list[PricePoint]] = {}
         symbol_by_id = {security.security_id: security.symbol for security in self._securities}
         with self.prices_csv.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -93,17 +93,19 @@ class CsvMarketProvider:
                 volume = _float(raw.get("volume"))
                 shares = _float(raw.get("shares_outstanding"))
                 source = f"CSV:{self.prices_csv.name}"
-                raw_prices[(security_id, dt)] = PricePoint(
-                    security_id=security_id,
-                    symbol=symbol,
-                    date=dt,
-                    close=close,
-                    adjusted=False,
-                    volume=volume,
-                    shares_outstanding=shares,
-                    source=source,
+                raw_buckets.setdefault(security_id, []).append(
+                    PricePoint(
+                        security_id=security_id,
+                        symbol=symbol,
+                        date=dt,
+                        close=close,
+                        adjusted=False,
+                        volume=volume,
+                        shares_outstanding=shares,
+                        source=source,
+                    )
                 )
-                buckets.setdefault(security_id, []).append(
+                adjusted_buckets.setdefault(security_id, []).append(
                     PricePoint(
                         security_id=security_id,
                         symbol=symbol,
@@ -115,13 +117,11 @@ class CsvMarketProvider:
                         source=source,
                     )
                 )
-        return (
-            {
-                security_id: tuple(sorted(points, key=lambda point: point.date))
-                for security_id, points in buckets.items()
-            },
-            raw_prices,
-        )
+        sort = lambda buckets: {
+            security_id: tuple(sorted(points, key=lambda point: point.date))
+            for security_id, points in buckets.items()
+        }
+        return sort(adjusted_buckets), sort(raw_buckets)
 
     def universe(self, as_of: date) -> tuple[SecurityIdentity, ...]:
         return tuple(
@@ -132,14 +132,12 @@ class CsvMarketProvider:
         )
 
     def price_on_or_before(self, security: SecurityIdentity, as_of: date) -> PricePoint | None:
-        dates = [
-            dt
-            for security_id, dt in self._raw_prices
-            if security_id == security.security_id and dt <= as_of
+        eligible = [
+            point
+            for point in self._raw_prices.get(security.security_id, ())
+            if point.date <= as_of
         ]
-        if not dates:
-            return None
-        return self._raw_prices[(security.security_id, max(dates))]
+        return max(eligible, key=lambda point: point.date) if eligible else None
 
     def adjusted_history(
         self,
