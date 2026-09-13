@@ -88,9 +88,7 @@ FACT_ALIASES: dict[str, tuple[FactAlias, ...]] = {
     "operating_cash_flow": (
         FactAlias("us-gaap", "NetCashProvidedByUsedInOperatingActivities"),
     ),
-    "capex": (
-        FactAlias("us-gaap", "PaymentsToAcquirePropertyPlantAndEquipment"),
-    ),
+    "capex": (FactAlias("us-gaap", "PaymentsToAcquirePropertyPlantAndEquipment"),),
     "debt_current": (
         FactAlias("us-gaap", "LongTermDebtCurrent"),
         FactAlias("us-gaap", "LongTermDebtAndFinanceLeaseObligationsCurrent"),
@@ -128,14 +126,14 @@ def _columnar_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
     if not lengths:
         return []
     count = min(lengths)
-    rows: list[dict[str, Any]] = []
-    for idx in range(count):
-        row: dict[str, Any] = {}
-        for key, value in data.items():
-            if isinstance(value, list) and idx < len(value):
-                row[key] = value[idx]
-        rows.append(row)
-    return rows
+    return [
+        {
+            key: value[idx]
+            for key, value in data.items()
+            if isinstance(value, list) and idx < len(value)
+        }
+        for idx in range(count)
+    ]
 
 
 def _filing_from_row(cik: str, row: dict[str, Any]) -> SecFiling | None:
@@ -158,19 +156,25 @@ def _filing_from_row(cik: str, row: dict[str, Any]) -> SecFiling | None:
 
 def _fact_rows(
     companyfacts: dict[str, Any], alias: FactAlias
-) -> tuple[str | None, list[tuple[str, dict[str, Any]]]]:
+) -> tuple[str | None, list[tuple[int, str, dict[str, Any]]]]:
     concept = companyfacts.get("facts", {}).get(alias.namespace, {}).get(alias.tag)
     if not isinstance(concept, dict):
         return None, []
     units = concept.get("units", {})
     if not isinstance(units, dict):
         return concept.get("label"), []
-    ordered_units = list(alias.preferred_units) + [key for key in units if key not in alias.preferred_units]
-    rows: list[tuple[str, dict[str, Any]]] = []
-    for unit in ordered_units:
+    ordered_units = list(alias.preferred_units) + [
+        key for key in units if key not in alias.preferred_units
+    ]
+    rows: list[tuple[int, str, dict[str, Any]]] = []
+    for unit_rank, unit in enumerate(ordered_units):
         values = units.get(unit)
         if isinstance(values, list):
-            rows.extend((unit, value) for value in values if isinstance(value, dict))
+            rows.extend(
+                (unit_rank, unit, value)
+                for value in values
+                if isinstance(value, dict)
+            )
     return concept.get("label"), rows
 
 
@@ -180,49 +184,61 @@ def select_point_in_time_fact(
     analysis_date: date,
     forms: Iterable[str] = DEFAULT_FORMS,
 ) -> SecFact | None:
+    """Select the newest standardized fact that was actually knowable by cutoff.
+
+    Alias priority is only a tie-breaker. This prevents a formerly used preferred
+    US-GAAP tag from hiding a newer period reported under another standard alias.
+    """
+
     allowed_forms = set(forms)
-    for alias in FACT_ALIASES.get(metric, ()):
+    candidates: list[
+        tuple[date, date, date, int, int, FactAlias, str | None, str, dict[str, Any]]
+    ] = []
+    for alias_rank, alias in enumerate(FACT_ALIASES.get(metric, ())):
         label, rows = _fact_rows(companyfacts, alias)
-        candidates: list[tuple[date, date, date, str, dict[str, Any]]] = []
-        for unit, row in rows:
+        for unit_rank, unit, row in rows:
             filed = _parse_date(row.get("filed"))
             end = _parse_date(row.get("end"))
             start = _parse_date(row.get("start")) or date.min
             form = row.get("form")
             value = row.get("val")
-            if filed is None or end is None or filed > analysis_date or end > analysis_date:
+            if filed is None or end is None:
+                continue
+            if filed > analysis_date or end > analysis_date:
                 continue
             if form and allowed_forms and form not in allowed_forms:
                 continue
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 continue
-            candidates.append((end, filed, start, unit, row))
-        if not candidates:
-            continue
-        # Prefer the most recent period end known by the cutoff. For duplicate
-        # contexts at that period end, prefer the latest filing available then.
-        end, filed, start, unit, row = max(candidates, key=lambda item: (item[0], item[1], item[2]))
-        return SecFact(
-            metric=metric,
-            namespace=alias.namespace,
-            tag=alias.tag,
-            label=label,
-            value=float(row["val"]),
-            unit=unit,
-            filed=filed,
-            period_end=end,
-            period_start=(None if start == date.min else start),
-            form=(str(row["form"]) if row.get("form") else None),
-            accession_number=(str(row["accn"]) if row.get("accn") else None),
-            fiscal_year=(int(row["fy"]) if isinstance(row.get("fy"), int) else None),
-            fiscal_period=(str(row["fp"]) if row.get("fp") else None),
-            frame=(str(row["frame"]) if row.get("frame") else None),
-        )
-    return None
+            candidates.append(
+                (end, filed, start, -alias_rank, -unit_rank, alias, label, unit, row)
+            )
+    if not candidates:
+        return None
+
+    end, filed, start, _alias_rank, _unit_rank, alias, label, unit, row = max(
+        candidates, key=lambda item: item[:5]
+    )
+    return SecFact(
+        metric=metric,
+        namespace=alias.namespace,
+        tag=alias.tag,
+        label=label,
+        value=float(row["val"]),
+        unit=unit,
+        filed=filed,
+        period_end=end,
+        period_start=(None if start == date.min else start),
+        form=(str(row["form"]) if row.get("form") else None),
+        accession_number=(str(row["accn"]) if row.get("accn") else None),
+        fiscal_year=(int(row["fy"]) if isinstance(row.get("fy"), int) else None),
+        fiscal_period=(str(row["fp"]) if row.get("fp") else None),
+        frame=(str(row["frame"]) if row.get("frame") else None),
+    )
 
 
 class SecClient:
-    """Small, fair-access SEC client for point-in-time research snapshots."""
+    """Small, fair-access SEC client for historical point-in-time snapshots."""
 
     def __init__(
         self,
@@ -239,7 +255,9 @@ class SecClient:
                 "SEC_USER_AGENT is required; identify your application and provide contact information"
             )
         if min_interval_seconds < 0.1:
-            raise ValueError("min_interval_seconds must be at least 0.1 to respect SEC fair-access limits")
+            raise ValueError(
+                "min_interval_seconds must be at least 0.1 to respect SEC fair-access limits"
+            )
         self.session = session or requests.Session()
         self.min_interval_seconds = min_interval_seconds
         self.clock = clock
@@ -281,10 +299,17 @@ class SecClient:
         payload = self._get_json(f"{SEC_WEB_BASE}/files/company_tickers.json")
         mapping: dict[str, tuple[str, str]] = {}
         for row in payload.values():
-            if not isinstance(row, dict) or not row.get("ticker") or row.get("cik_str") is None:
+            if (
+                not isinstance(row, dict)
+                or not row.get("ticker")
+                or row.get("cik_str") is None
+            ):
                 continue
             ticker = str(row["ticker"]).upper()
-            mapping[ticker] = (normalize_cik(row["cik_str"]), str(row.get("title", "")))
+            mapping[ticker] = (
+                normalize_cik(row["cik_str"]),
+                str(row.get("title", "")),
+            )
         self._ticker_map = mapping
         return mapping
 
@@ -301,90 +326,8 @@ class SecClient:
 
     def companyfacts(self, cik: str | int) -> dict[str, Any]:
         cik10 = normalize_cik(cik)
-        return self._get_json(f"{SEC_DATA_BASE}/api/xbrl/companyfacts/CIK{cik10}.json")
-
-    def filings_as_of(
-        self,
-        cik: str | int,
-        analysis_date: date,
-        forms: Iterable[str] = DEFAULT_FORMS,
-    ) -> tuple[SecFiling, ...]:
-        cik10 = normalize_cik(cik)
-        payload = self.submissions(cik10)
-        rows = _columnar_rows(payload.get("filings", {}).get("recent", {}))
-
-        # SEC moves older filing rows into named history JSON files. Fetch only
-        # history files whose advertised start date is not after the cutoff.
-        for history in payload.get("filings", {}).get("files", []):
-            if not isinstance(history, dict) or not history.get("name"):
-                continue
-            start = _parse_date(history.get("filingFrom"))
-            if start is not None and start > analysis_date:
-                continue
-            history_payload = self._get_json(f"{SEC_DATA_BASE}/submissions/{history['name']}")
-            rows.extend(_columnar_rows(history_payload))
-
-        allowed = set(forms)
-        filings: list[SecFiling] = []
-        seen: set[str] = set()
-        for row in rows:
-            filing = _filing_from_row(cik10, row)
-            if filing is None or filing.filing_date > analysis_date:
-                continue
-            if allowed and filing.form not in allowed:
-                continue
-            if filing.accession_number in seen:
-                continue
-            seen.add(filing.accession_number)
-            filings.append(filing)
-        filings.sort(key=lambda item: (item.filing_date, item.accession_number), reverse=True)
-        return tuple(filings)
-
-    def snapshot(
-        self,
-        *,
-        analysis_date: date,
-        ticker: str | None = None,
-        cik: str | int | None = None,
-        forms: Iterable[str] = DEFAULT_FORMS,
-        filing_limit: int = 20,
-    ) -> SecPointInTimeSnapshot:
-        if (ticker is None) == (cik is None):
-            raise ValueError("provide exactly one of ticker or cik")
-        resolved_name = ""
-        resolved_ticker = ticker.upper().strip() if ticker else None
-        if ticker is not None:
-            cik10, resolved_name = self.resolve_ticker(ticker)
-        else:
-            cik10 = normalize_cik(cik or "")
-
-        submissions = self.submissions(cik10)
-        company_name = str(submissions.get("name") or resolved_name or cik10)
-        filings = self._filings_from_submissions_payload(cik10, submissions, analysis_date, forms)
-        facts_payload = self.companyfacts(cik10)
-        facts: dict[str, SecFact] = {}
-        missing: list[str] = []
-        for metric in FACT_ALIASES:
-            fact = select_point_in_time_fact(facts_payload, metric, analysis_date, forms)
-            if fact is None:
-                missing.append(metric)
-            else:
-                facts[metric] = fact
-
-        warnings = [
-            "SEC companyfacts uses standardized XBRL concepts; company-specific extension facts may be absent.",
-            "Duration facts such as revenue, CFO and capex are raw reported periods, not normalized quarterly values.",
-        ]
-        if missing:
-            warnings.append("No standardized point-in-time fact found for: " + ", ".join(missing))
-        return SecPointInTimeSnapshot(
-            ticker=resolved_ticker,
-            cik=cik10,
-            company_name=company_name,
-            analysis_date=analysis_date,
-            filings=filings[:filing_limit],
-            facts=facts,
-            warnings=tuple(warnings),
+        return self._get_json(
+            f"{SEC_DATA_BASE}/api/xbrl/companyfacts/CIK{cik10}.json"
         )
 
     def _filings_from_submissions_payload(
@@ -401,8 +344,11 @@ class SecClient:
             start = _parse_date(history.get("filingFrom"))
             if start is not None and start > analysis_date:
                 continue
-            history_payload = self._get_json(f"{SEC_DATA_BASE}/submissions/{history['name']}")
+            history_payload = self._get_json(
+                f"{SEC_DATA_BASE}/submissions/{history['name']}"
+            )
             rows.extend(_columnar_rows(history_payload))
+
         allowed = set(forms)
         filings: list[SecFiling] = []
         seen: set[str] = set()
@@ -416,11 +362,84 @@ class SecClient:
                 continue
             seen.add(filing.accession_number)
             filings.append(filing)
-        filings.sort(key=lambda item: (item.filing_date, item.accession_number), reverse=True)
+        filings.sort(
+            key=lambda item: (item.filing_date, item.accession_number), reverse=True
+        )
         return tuple(filings)
 
+    def filings_as_of(
+        self,
+        cik: str | int,
+        analysis_date: date,
+        forms: Iterable[str] = DEFAULT_FORMS,
+    ) -> tuple[SecFiling, ...]:
+        cik10 = normalize_cik(cik)
+        payload = self.submissions(cik10)
+        return self._filings_from_submissions_payload(
+            cik10, payload, analysis_date, forms
+        )
 
-def snapshot_to_evidence(snapshot: SecPointInTimeSnapshot) -> tuple[EvidenceRecord, ...]:
+    def snapshot(
+        self,
+        *,
+        analysis_date: date,
+        ticker: str | None = None,
+        cik: str | int | None = None,
+        forms: Iterable[str] = DEFAULT_FORMS,
+        filing_limit: int = 20,
+    ) -> SecPointInTimeSnapshot:
+        if (ticker is None) == (cik is None):
+            raise ValueError("provide exactly one of ticker or cik")
+        if filing_limit < 0:
+            raise ValueError("filing_limit cannot be negative")
+
+        resolved_name = ""
+        resolved_ticker = ticker.upper().strip() if ticker else None
+        if ticker is not None:
+            cik10, resolved_name = self.resolve_ticker(ticker)
+        else:
+            cik10 = normalize_cik(cik or "")
+
+        submissions = self.submissions(cik10)
+        company_name = str(submissions.get("name") or resolved_name or cik10)
+        filings = self._filings_from_submissions_payload(
+            cik10, submissions, analysis_date, forms
+        )
+        facts_payload = self.companyfacts(cik10)
+        facts: dict[str, SecFact] = {}
+        missing: list[str] = []
+        for metric in FACT_ALIASES:
+            fact = select_point_in_time_fact(
+                facts_payload, metric, analysis_date, forms
+            )
+            if fact is None:
+                missing.append(metric)
+            else:
+                facts[metric] = fact
+
+        warnings = [
+            "SEC companyfacts uses standardized XBRL concepts; company-specific extension facts may be absent.",
+            "Duration facts such as revenue, CFO and capex are raw reported periods, not normalized quarterly values.",
+            "SEC ticker/CIK association files are a lookup aid and SEC does not guarantee their accuracy or scope.",
+        ]
+        if missing:
+            warnings.append(
+                "No standardized point-in-time fact found for: " + ", ".join(missing)
+            )
+        return SecPointInTimeSnapshot(
+            ticker=resolved_ticker,
+            cik=cik10,
+            company_name=company_name,
+            analysis_date=analysis_date,
+            filings=filings[:filing_limit],
+            facts=facts,
+            warnings=tuple(warnings),
+        )
+
+
+def snapshot_to_evidence(
+    snapshot: SecPointInTimeSnapshot,
+) -> tuple[EvidenceRecord, ...]:
     evidence: list[EvidenceRecord] = []
     for filing in snapshot.filings:
         evidence.append(
@@ -443,12 +462,15 @@ def snapshot_to_evidence(snapshot: SecPointInTimeSnapshot) -> tuple[EvidenceReco
                 evidence_type="fact",
                 event_on=fact.period_end,
                 locator=(
-                    f"https://www.sec.gov/Archives/edgar/data/{int(snapshot.cik)}/"
+                    f"{SEC_WEB_BASE}/Archives/edgar/data/{int(snapshot.cik)}/"
                     f"{fact.accession_number.replace('-', '')}/"
                     if fact.accession_number
                     else None
                 ),
-                notes=f"{fact.namespace}:{fact.tag}; form={fact.form}; start={fact.period_start}; end={fact.period_end}",
+                notes=(
+                    f"{fact.namespace}:{fact.tag}; form={fact.form}; "
+                    f"start={fact.period_start}; end={fact.period_end}"
+                ),
             )
         )
     return tuple(evidence)
@@ -460,10 +482,10 @@ def snapshot_to_dict(snapshot: SecPointInTimeSnapshot) -> dict[str, Any]:
             return value.isoformat()
         if isinstance(value, tuple):
             return [convert(item) for item in value]
+        if isinstance(value, list):
+            return [convert(item) for item in value]
         if isinstance(value, dict):
             return {key: convert(item) for key, item in value.items()}
-        if hasattr(value, "__dataclass_fields__"):
-            return {key: convert(item) for key, item in asdict(value).items()}
         return value
 
-    return convert(snapshot)
+    return convert(asdict(snapshot))
