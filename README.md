@@ -78,7 +78,9 @@ python -m transformation_scanner \
 4. `Critical Assumption Count`
 5. `Common Equity Capture Ratio`
 
-회계·산술은 결정론적 코드가 수행하고, 에이전트는 survival audit, temporary vs permanent impairment, 정상화 economics 반증, probability range calibration, 모델 이중계산 검증만 맡도록 분리했습니다. 에이전트가 임의의 성공확률을 만들어내지 않는 것이 핵심 원칙입니다.
+회계·산술은 결정론적 코드가 수행하고, 에이전트는 survival audit, temporary vs permanent impairment, 정상화 economics 반증, probability range calibration, 모델 이중계산 검증만 맡습니다. 에이전트가 임의의 성공확률을 만들어내지 않는 것이 핵심 원칙입니다.
+
+단일 기업 정밀 분석:
 
 ```bash
 python -m distressed_equity examples/distressed_equity_case.json
@@ -86,6 +88,17 @@ python -m distressed_equity examples/distressed_equity_case.json
 
 distressed-equity examples/distressed_equity_case.json -o output/example.md
 ```
+
+시장/후보군 1차 스크리닝:
+
+```bash
+distressed-equity-screen examples/distressed_equity_universe.jsonl \
+  -o output/universe.md \
+  --json-output output/universe.json \
+  --tasks-output output/research_tasks.json
+```
+
+Universe scanner는 후보를 하나의 종합점수로 줄이지 않습니다. `distress / real business / survival / base payoff / assumption burden` gate를 별도로 보여주고 `DEEP_DIVE_CANDIDATE / RESEARCH / DROP`으로 연구 우선순위를 정합니다. Recovery 전에 refinancing이나 covenant 문제가 있으면 자동 생존으로 가정하지 않고 `RESEARCH`로 남깁니다.
 
 자세한 설계는 [`docs/DISTRESSED_EQUITY.md`](docs/DISTRESSED_EQUITY.md)를 참고하세요.
 
