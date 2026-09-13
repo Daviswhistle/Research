@@ -26,6 +26,7 @@ class FakeSession:
             return FakeResponse(
                 "symbol,name,exchange,assetType,ipoDate,delistingDate,status\n"
                 "DEAD,Later Delisted Co,NYSE,Stock,2018-01-01,2023-06-30,Active\n"
+                "OPEN,Still Listed Co,NASDAQ,Stock,2019-01-01,null,Active\n"
                 "ETF1,Fund,NASDAQ,ETF,2015-01-01,,Active\n"
             )
         if function == "TIME_SERIES_DAILY":
@@ -48,8 +49,9 @@ def test_alpha_vantage_historical_universe_keeps_later_delisted_stock():
     session = FakeSession()
     provider = AlphaVantageProvider(api_key="x", session=session)
     universe = provider.universe(date(2022, 12, 31))
-    assert [security.symbol for security in universe] == ["DEAD"]
+    assert [security.symbol for security in universe] == ["DEAD", "OPEN"]
     assert universe[0].end_date == date(2023, 6, 30)
+    assert universe[1].end_date is None
     listing_call = session.calls[0]
     assert listing_call["date"] == "2022-12-31"
     assert listing_call["state"] == "active"
