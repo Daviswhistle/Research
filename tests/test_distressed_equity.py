@@ -118,3 +118,25 @@ def test_recovery_beyond_forecast_horizon_is_unresolved():
 
 def test_required_probability_is_zero_when_downside_already_clears_target():
     assert required_probability(4.0, 2.0, 1.5) == 0.0
+
+
+def test_refinancing_before_recovery_keeps_survival_unresolved():
+    raw = {
+        "ticker": "REFI",
+        "company_name": "Refi Co",
+        "capital_structure": {"current_price": 1, "current_shares": 100},
+        "liquidity": {"starting_liquidity": 100, "monthly_free_cash_flow": [0] * 24, "recovery_month": 18},
+        "debt_obligations": [
+            {"name": "2027 term loan", "amount": 200, "due_month": 12, "refinancing_required": True}
+        ],
+        "scenarios": [
+            {"name": "distress", "enterprise_value": 0, "exit_net_debt": 0},
+            {"name": "weak", "enterprise_value": 100, "exit_net_debt": 0},
+            {"name": "base", "enterprise_value": 500, "exit_net_debt": 0},
+        ],
+        "probability_view": {"target_cagr": 0.15, "horizon_years": 3},
+    }
+    result = analyze_case(case_from_dict(raw))
+    assert result.survives_to_recovery_window is None
+    assert result.pre_recovery_refinancing == ("2027 term loan",)
+    assert "refinancing" in result.verdict.lower()
