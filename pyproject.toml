@@ -23,6 +23,7 @@ test = [
 transformation-scanner = "transformation_scanner.cli:main"
 distressed-equity = "distressed_equity.cli:main"
 distressed-equity-screen = "distressed_equity.screen_cli:main"
+distressed-equity-sec = "distressed_equity.sec_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["transformation_scanner*", "distressed_equity*"]
