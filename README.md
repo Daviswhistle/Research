@@ -100,6 +100,28 @@ distressed-equity-screen examples/distressed_equity_universe.jsonl \
 
 Universe scanner는 후보를 하나의 종합점수로 줄이지 않습니다. `distress / real business / survival / base payoff / assumption burden` gate를 별도로 보여주고 `DEEP_DIVE_CANDIDATE / RESEARCH / DROP`으로 연구 우선순위를 정합니다. Recovery 전에 refinancing이나 covenant 문제가 있으면 자동 생존으로 가정하지 않고 `RESEARCH`로 남깁니다.
 
+### SEC point-in-time evidence
+
+미국 상장사는 SEC의 `submissions`와 XBRL `companyfacts` API를 이용해 **분석일 당시 실제로 공개되어 있던 자료만** 스냅샷으로 만들 수 있습니다.
+
+```bash
+export SEC_USER_AGENT="Research your-email@example.com"
+
+distressed-equity-sec \
+  --ticker CVNA \
+  --analysis-date 2022-12-31 \
+  -o output/cvna_2022-12-31_sec.json
+```
+
+스냅샷에는 분석일 이전 10-K/10-Q/8-K 목록, SEC archive 링크, 그리고 표준 XBRL에서 찾은 revenue, operating income, cash, CFO, capex, debt, shares가 source/date/period와 함께 저장됩니다. 분석일 뒤 제출된 행은 제외합니다.
+
+주의할 점:
+
+- `companyfacts`의 표준 taxonomy만으로 회사별 extension fact가 모두 잡히지는 않습니다.
+- revenue/CFO/capex 같은 duration fact는 보고된 원기간 그대로이며 자동으로 분기 정상화하지 않습니다.
+- SEC ticker/CIK 매핑은 검색 편의를 위한 자료이므로 CIK와 회사명을 결과에 함께 남깁니다.
+- 자동접근은 SEC fair-access 정책을 지켜야 하므로 클라이언트는 식별 가능한 User-Agent를 요구하고 10 req/s보다 느리게 제한합니다.
+
 자세한 설계는 [`docs/DISTRESSED_EQUITY.md`](docs/DISTRESSED_EQUITY.md)를 참고하세요.
 
 ### 테스트
