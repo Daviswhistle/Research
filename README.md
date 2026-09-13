@@ -66,11 +66,34 @@ python -m transformation_scanner \
 
 자세한 설계, 점수 해석과 한계는 [`docs/TRANSFORMATION_SCANNER.md`](docs/TRANSFORMATION_SCANNER.md)를 참고하세요.
 
+## Distressed Equity Convexity Engine
+
+2022년 Carvana 같은 표면적 패턴을 복제하는 대신, **시장 암시 실패확률이 현실의 실패확률보다 높고 생존·정상화 시 기존 보통주 payoff가 큰 기업**을 검증하기 위한 연구 엔진입니다.
+
+핵심 출력은 다음 다섯 가지입니다.
+
+1. `Time to Death`
+2. `Base-case Equity Multiple`
+3. `Required Probability`
+4. `Critical Assumption Count`
+5. `Common Equity Capture Ratio`
+
+회계·산술은 결정론적 코드가 수행하고, 에이전트는 survival audit, temporary vs permanent impairment, 정상화 economics 반증, probability range calibration, 모델 이중계산 검증만 맡도록 분리했습니다. 에이전트가 임의의 성공확률을 만들어내지 않는 것이 핵심 원칙입니다.
+
+```bash
+python -m distressed_equity examples/distressed_equity_case.json
+# 또는
+
+distressed-equity examples/distressed_equity_case.json -o output/example.md
+```
+
+자세한 설계는 [`docs/DISTRESSED_EQUITY.md`](docs/DISTRESSED_EQUITY.md)를 참고하세요.
+
 ### 테스트
 
 ```bash
-python -m compileall -q transformation_scanner
+python -m compileall -q transformation_scanner distressed_equity
 python -m pytest
 ```
 
-> 이 탐색기의 점수는 매수 신호가 아닙니다. 사람이 당일 원문과 자본구조를 먼저 읽어야 할 후보를 정렬하는 연구 우선순위입니다.
+> 두 도구의 결과는 매수·매도 신호가 아닙니다. 사람이 원문, 자본구조, 회계처리와 반증 근거를 먼저 검토할 후보를 정렬하는 연구 도구입니다.

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dart-transformation-scanner"
 version = "0.1.0"
-description = "OpenDART-based scanner for listed companies undergoing economic transformation"
+description = "OpenDART transformation scanner and experimental investment research tools"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -21,9 +21,10 @@ test = [
 
 [project.scripts]
 transformation-scanner = "transformation_scanner.cli:main"
+distressed-equity = "distressed_equity.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["transformation_scanner*"]
+include = ["transformation_scanner*", "distressed_equity*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

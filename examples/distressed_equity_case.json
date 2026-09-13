@@ -1,0 +1,60 @@
+{
+  "ticker": "EXAMPLE",
+  "company_name": "Example Distressed Co",
+  "capital_structure": {
+    "current_price": 3.0,
+    "current_shares": 100000000,
+    "net_debt": 650000000,
+    "other_senior_claims": 50000000
+  },
+  "liquidity": {
+    "starting_liquidity": 300000000,
+    "monthly_free_cash_flow": [-25000000, -25000000, -20000000, -15000000, -10000000, -5000000, 0, 5000000, 10000000, 15000000, 20000000, 20000000],
+    "mandatory_payments": {"6": 50000000},
+    "recovery_month": 9
+  },
+  "scenarios": [
+    {
+      "name": "distress",
+      "enterprise_value": 500000000,
+      "exit_net_debt": 600000000,
+      "exit_senior_claims": 50000000,
+      "critical_assumptions": ["asset sale closes before liquidity exhaustion"]
+    },
+    {
+      "name": "weak",
+      "enterprise_value": 900000000,
+      "exit_net_debt": 550000000,
+      "exit_senior_claims": 50000000,
+      "critical_assumptions": ["cash burn stabilizes"]
+    },
+    {
+      "name": "base",
+      "enterprise_value": 1800000000,
+      "exit_net_debt": 450000000,
+      "exit_senior_claims": 50000000,
+      "financing": {"capital_raised": 100000000, "issue_price": 2.0},
+      "critical_assumptions": ["customer losses stop", "unit margin normalizes"]
+    },
+    {
+      "name": "strong",
+      "enterprise_value": 3000000000,
+      "exit_net_debt": 350000000,
+      "exit_senior_claims": 50000000,
+      "critical_assumptions": ["revenue returns to growth", "margin exceeds base"]
+    }
+  ],
+  "probability_view": {
+    "target_cagr": 0.15,
+    "horizon_years": 3,
+    "success_scenario": "base",
+    "downside_scenario": "distress",
+    "reasonable_probability_low": 0.40,
+    "reasonable_probability_high": 0.60
+  },
+  "capture_reference_scenario": "weak",
+  "metadata": {
+    "as_of_date": "2026-09-14",
+    "currency": "USD"
+  }
+}
