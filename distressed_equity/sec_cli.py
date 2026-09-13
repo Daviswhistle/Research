@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .evidence import validate_point_in_time
+from .prefill import build_screening_draft, build_sec_prefill_tasks
 from .sec import DEFAULT_FORMS, SecClient, snapshot_to_dict, snapshot_to_evidence
 
 
@@ -27,7 +28,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated filing forms to retain",
     )
     parser.add_argument("--filing-limit", type=int, default=20)
-    parser.add_argument("--output", "-o", help="JSON output path; stdout when omitted")
+    parser.add_argument("--output", "-o", help="JSON research packet path; stdout when omitted")
+    parser.add_argument("--tasks-output", help="Optional JSON path containing agent research tasks only")
     return parser
 
 
@@ -43,6 +45,15 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _write_json(path: str, payload: object) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(_jsonable(payload), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cutoff = date.fromisoformat(args.analysis_date)
@@ -56,10 +67,13 @@ def main(argv: list[str] | None = None) -> int:
         filing_limit=args.filing_limit,
     )
     evidence = snapshot_to_evidence(snapshot)
+    tasks = build_sec_prefill_tasks(snapshot)
     payload = {
         "snapshot": snapshot_to_dict(snapshot),
         "evidence": [_jsonable(asdict(record)) for record in evidence],
         "point_in_time_violations": list(validate_point_in_time(evidence, cutoff)),
+        "screening_draft": build_screening_draft(snapshot),
+        "agent_tasks": [_jsonable(asdict(task)) for task in tasks],
     }
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
@@ -68,6 +82,17 @@ def main(argv: list[str] | None = None) -> int:
         target.write_text(text, encoding="utf-8")
     else:
         print(text, end="")
+
+    if args.tasks_output:
+        _write_json(
+            args.tasks_output,
+            {
+                "ticker": snapshot.ticker,
+                "company_name": snapshot.company_name,
+                "analysis_date": snapshot.analysis_date.isoformat(),
+                "tasks": [asdict(task) for task in tasks],
+            },
+        )
     return 0
 
 
