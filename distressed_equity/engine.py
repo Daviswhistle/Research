@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
-from .models import CaseInput, Scenario
+from .models import CapitalStructure, CaseInput, Scenario
 
 
 @dataclass(frozen=True)
@@ -29,38 +29,43 @@ class CaseResult:
     probability_margin_high: float | None
     common_equity_capture_ratio: float | None
     base_assumption_efficiency: float | None
+    pre_recovery_refinancing: tuple[str, ...]
+    pre_recovery_covenants: tuple[str, ...]
     verdict: str
 
 
+def _mandatory_cash_payments(case: CaseInput) -> dict[int, float]:
+    payments = dict(case.liquidity.mandatory_payments)
+    for obligation in case.debt_obligations:
+        if obligation.cash_payment_required:
+            payments[obligation.due_month] = payments.get(obligation.due_month, 0.0) + obligation.amount
+    return payments
+
+
 def time_to_liquidity_exhaustion(case: CaseInput) -> int | None:
-    liquidity = case.liquidity.starting_liquidity
+    liquidity = case.liquidity.total_available_liquidity
     if liquidity < 0:
         return 0
+    mandatory = _mandatory_cash_payments(case)
     for month, fcf in enumerate(case.liquidity.monthly_free_cash_flow, start=1):
         liquidity += fcf
-        liquidity -= case.liquidity.mandatory_payments.get(month, 0.0)
+        liquidity -= mandatory.get(month, 0.0)
         if liquidity < 0:
             return month
     return None
 
 
-def value_scenario(case: CaseInput, scenario: Scenario) -> ScenarioResult:
+def value_scenario_for_capital(capital: CapitalStructure, scenario: Scenario) -> ScenarioResult:
     new_shares = scenario.financing.new_shares()
-    diluted_shares = case.capital_structure.current_shares + new_shares
-    holder_fraction = (
-        case.capital_structure.current_shares / diluted_shares if diluted_shares > 0 else 0.0
-    )
+    diluted_shares = capital.current_shares + new_shares
+    holder_fraction = capital.current_shares / diluted_shares if diluted_shares > 0 else 0.0
     total_equity = max(
         scenario.enterprise_value - scenario.exit_net_debt - scenario.exit_senior_claims,
         0.0,
     )
     existing_common = total_equity * holder_fraction
-    per_current_share = (
-        existing_common / case.capital_structure.current_shares
-        if case.capital_structure.current_shares > 0
-        else 0.0
-    )
-    market_cap = case.capital_structure.current_market_cap
+    per_current_share = existing_common / capital.current_shares if capital.current_shares > 0 else 0.0
+    market_cap = capital.current_market_cap
     multiple = existing_common / market_cap if market_cap > 0 else math.nan
     return ScenarioResult(
         name=scenario.name,
@@ -72,6 +77,10 @@ def value_scenario(case: CaseInput, scenario: Scenario) -> ScenarioResult:
         equity_multiple=multiple,
         critical_assumption_count=len(scenario.critical_assumptions),
     )
+
+
+def value_scenario(case: CaseInput, scenario: Scenario) -> ScenarioResult:
+    return value_scenario_for_capital(case.capital_structure, scenario)
 
 
 def required_probability(
@@ -92,6 +101,31 @@ def common_equity_capture_ratio(
     return (base.existing_common_value - reference.existing_common_value) / delta_ev
 
 
+def _pre_recovery_refinancing(case: CaseInput) -> tuple[str, ...]:
+    recovery = case.liquidity.recovery_month
+    if recovery is None:
+        return ()
+    return tuple(
+        obligation.name
+        for obligation in case.debt_obligations
+        if obligation.refinancing_required
+        and not obligation.cash_payment_required
+        and obligation.due_month <= recovery
+    )
+
+
+def _pre_recovery_covenants(case: CaseInput) -> tuple[str, ...]:
+    recovery = case.liquidity.recovery_month
+    if recovery is None:
+        return ()
+    return tuple(
+        covenant.name
+        for covenant in case.covenants
+        if covenant.breach_month_if_unremedied is not None
+        and covenant.breach_month_if_unremedied <= recovery
+    )
+
+
 def analyze_case(case: CaseInput) -> CaseResult:
     scenario_inputs = {scenario.name: scenario for scenario in case.scenarios}
     scenario_results = {name: value_scenario(case, scenario) for name, scenario in scenario_inputs.items()}
@@ -110,14 +144,20 @@ def analyze_case(case: CaseInput) -> CaseResult:
     )
 
     ttd = time_to_liquidity_exhaustion(case)
-    if case.liquidity.recovery_month is None:
+    refinancing = _pre_recovery_refinancing(case)
+    covenants = _pre_recovery_covenants(case)
+    recovery = case.liquidity.recovery_month
+    forecast_horizon = len(case.liquidity.monthly_free_cash_flow)
+    if recovery is None:
         survives_recovery = None
-    elif case.liquidity.recovery_month > len(case.liquidity.monthly_free_cash_flow):
+    elif ttd is not None and ttd <= recovery:
+        survives_recovery = False
+    elif recovery > forecast_horizon:
         survives_recovery = None
-    elif ttd is None:
-        survives_recovery = True
+    elif refinancing or covenants:
+        survives_recovery = None
     else:
-        survives_recovery = ttd > case.liquidity.recovery_month
+        survives_recovery = True
 
     probability_margin_low = None
     probability_margin_high = None
@@ -148,6 +188,8 @@ def analyze_case(case: CaseInput) -> CaseResult:
         verdict = "PASS: success case does not improve enough over downside"
     elif rp > 1:
         verdict = "PASS: target return is unattainable under selected success/downside cases"
+    elif survives_recovery is None and (refinancing or covenants):
+        verdict = "REVIEW: pre-recovery refinancing/covenant path is unresolved"
     elif pv.reasonable_probability_low is not None and pv.reasonable_probability_low > rp:
         verdict = "DEEP DIVE: conservative probability range clears required probability"
     elif pv.reasonable_probability_high is not None and pv.reasonable_probability_high < rp:
@@ -165,5 +207,7 @@ def analyze_case(case: CaseInput) -> CaseResult:
         probability_margin_high=probability_margin_high,
         common_equity_capture_ratio=capture,
         base_assumption_efficiency=base_efficiency,
+        pre_recovery_refinancing=refinancing,
+        pre_recovery_covenants=covenants,
         verdict=verdict,
     )
