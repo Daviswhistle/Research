@@ -17,6 +17,8 @@ field-level proposals + exact source span
   ↓
 human/agent verification
   ↓
+source_refs / accession validation
+  ↓
 DebtInstrumentSnapshot
   ↓
 stable-ID debt ledger
@@ -111,14 +113,23 @@ distressed-equity-sec-instruments \
   --template-output output/cvna_debt_instruments.json
 ```
 
-검증을 끝낸 template은:
+검증을 끝낸 template은 source packet과 함께 ledger로 넘긴다.
 
 ```bash
 distressed-equity-debt-ledger output/cvna_debt_instruments.json \
+  --source-packet output/cvna_debt_sources.json \
   -o output/cvna_debt_ledger.json
 ```
 
-으로 넘긴다.
+`--source-packet`이 있으면 다음을 강제한다.
+
+- 모든 snapshot은 하나 이상의 `source_refs`를 가져야 한다.
+- 모든 ref는 frozen source packet의 실제 span ID여야 한다.
+- `source_accession`은 cited spans의 accession과 일치해야 한다.
+- snapshot `as_of_date`는 cited exhibit 공개일보다 빠를 수 없다.
+- snapshot `as_of_date`는 workspace cutoff보다 늦을 수 없다.
+
+따라서 verified instrument JSON에 출처 없는 숫자를 임의로 추가해 stable ledger로 보내는 경로를 차단한다.
 
 ## Research workspace
 
@@ -136,6 +147,8 @@ summary.md
 ```
 
 `research_packet.json`은 frozen point-in-time input이다. 검증 후 stable debt ledger는 별도 artifact로 유지한다.
+
+Workspace의 `--debt-instruments` 경로는 source packet이 존재하면 위 provenance validation을 자동 적용한다.
 
 ## 일부러 자동화하지 않는 것
 
