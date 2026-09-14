@@ -22,9 +22,9 @@ same CIK
 
 반대로 이름이 비슷하다는 이유만으로 alias를 만들지 않는다.
 
-## Source
+## Sources
 
-기본 source는 SEC submissions endpoint다.
+기본 metadata source는 SEC submissions endpoint다.
 
 ```text
 https://data.sec.gov/submissions/CIK##########.json
@@ -32,11 +32,24 @@ https://data.sec.gov/submissions/CIK##########.json
 
 SEC는 이 구조에 current name과 former name 같은 filer metadata가 포함된다고 설명한다.
 
+추가 point-in-time source로 cutoff 이전 filing의 **Complete submission text file** `<SEC-HEADER>`를 사용한다.
+
+```text
+https://www.sec.gov/Archives/edgar/data/<CIK>/<ACCESSION_NO_DASHES>/<ACCESSION>.txt
+```
+
+Header에서 target CIK의 entity block만 선택해 다음을 읽는다.
+
+```text
+COMPANY CONFORMED NAME
+CENTRAL INDEX KEY
+FORMER CONFORMED NAME
+DATE OF NAME CHANGE
+```
+
 CIK는 filer에 부여되는 고유 식별자이므로 이름 변경 전후 identity의 deterministic anchor로 사용한다.
 
-현재 구현은 submissions의 `name`과 `formerNames` metadata를 사용한다.
-
-중요: `formerNames.from/to`를 주법상 법적 이름변경 효력일로 단정하지 않는다. 이 날짜는 이 연구 파이프라인에서 **SEC identity metadata의 시간 경계**로만 사용한다.
+중요: submissions의 `formerNames.from/to`와 header의 `DATE OF NAME CHANGE`를 주법상 법적 이름변경 효력일로 단정하지 않는다. 이 날짜들은 이 연구 파이프라인에서 **SEC identity metadata의 시간 경계**로만 사용한다.
 
 ## Datamodel
 
@@ -62,16 +75,17 @@ source_kind
 source
 ```
 
-`effective_on`은 현재 source가 제공하는 SEC metadata transition boundary다. 법률적 charter amendment effective date라는 뜻은 아니다.
-
-### `LegalNameAliasGraph`
+### `ReconciledLegalNameAliasGraph`
 
 ```text
 cik
 analysis_date
 canonical_name_as_of
+canonical_status
 records
 transitions
+comparisons
+header_evidence
 warnings
 ```
 
@@ -104,8 +118,6 @@ facebook inc == meta platforms inc
 
 2020년 분석에 2021년 이후 rename을 넣으면 hindsight다.
 
-Research workspace의 `snapshot.company_name`, evidence claim, summary display도 `Facebook Inc.`를 사용한다. 현재 SEC 이름인 `Meta Platforms, Inc.`가 과거 workspace 표시명으로 새어 들어오지 않는다.
-
 ### cutoff = 2022-12-31
 
 rename boundary가 cutoff 이전이므로:
@@ -119,19 +131,65 @@ alias set = {
 
 가 허용된다.
 
-## Future-current-name withholding
+## Complete-header fallback
 
-현재 SEC `name`은 미래 이름인데 `formerNames` history가 모두 분석 cutoff 뒤에만 존재할 수 있다.
+submissions `formerNames`가 비어 있거나 current name의 역사적 유효시점을 설명하지 못하는 경우 complete-submission header를 fallback으로 사용한다.
 
-이 경우 현재 이름을 과거 이름으로 추정하지 않는다.
+예:
 
 ```text
-canonical_name_as_of = null
+analysis cutoff: 2020-12-31
+submissions current name today: Future Name Inc.
+submissions formerNames: []
+2020-11-01 complete header: Historical Name Inc.
 ```
 
-로 남긴다. Research workspace는 이 경우 현재 이름 대신 CIK를 표시명 fallback으로 사용한다.
+이 경우 현재 이름을 과거로 backfill하지 않는다.
 
-즉 모르는 것을 현재 이름으로 backfill하지 않는다.
+```text
+canonical_name_as_of = Historical Name Inc.
+canonical_status = conflict_header_preferred
+```
+
+근거 없는 `Future Name Inc.`는 historical alias set에서도 제외한다.
+
+반대로 latest sampled header 이후 cutoff 이전에 날짜가 있는 submissions rename transition이 존재하면 더 최근 transition을 인정할 수 있다.
+
+## Reconciliation states
+
+### `canonical_status`
+
+- `confirmed_by_header_and_submissions`
+- `header_only_fallback`
+- `submissions_only`
+- `submissions_newer_than_latest_header`
+- `conflict_header_preferred`
+
+### per-name `comparisons[].status`
+
+- `confirmed_same_boundary`
+- `confirmed_name_boundary_unavailable`
+- `boundary_conflict`
+- `header_only`
+- `submissions_only`
+
+`boundary_conflict`는 한 source를 조용히 덮어쓰지 않고 warning과 provenance로 남긴다.
+
+## Multi-entity submission guard
+
+하나의 complete submission에는 filer, issuer, reporting owner, subject company가 함께 존재할 수 있다.
+
+따라서 header 전체의 former name을 합치지 않는다.
+
+```text
+entity section
+    ↓
+CENTRAL INDEX KEY == target CIK
+    ↓
+그 section의 current/former name만 사용
+```
+
+다른 CIK의 이름은 alias graph에 들어올 수 없다.
 
 ## Party matching integration
 
@@ -180,7 +238,7 @@ contract kind
 
 ## Cross-CIK integration
 
-Cross-CIK resolver가 explicit SEC locator로 foreign CIK를 발견하면 그 CIK에 대해서도 name-history graph를 수집한다.
+Cross-CIK resolver가 explicit SEC locator로 foreign CIK를 발견하면 그 CIK에 대해서도 같은 reconciled name-history builder를 사용한다.
 
 중요한 순서는 다음과 같다.
 
@@ -189,7 +247,7 @@ explicit SEC CIK / Archives locator
     ↓
 CIK 확정
     ↓
-그 CIK의 submissions name history 조회
+그 CIK의 submissions + historical complete-header 조회
 ```
 
 절대 다음처럼 하지 않는다.
@@ -202,7 +260,7 @@ CIK 추정
 
 따라서 legal-name alias graph는 cross-CIK traversal을 허가하는 근거가 아니다. 이미 SEC evidence로 확정된 CIK의 identity history를 보강하는 artifact다.
 
-`cross_cik_graph.json`에는 root CIK와 명시적으로 발견된 foreign CIK들의 cutoff-safe `legal_name_alias_graphs`를 함께 frozen 한다. Auxiliary foreign-name lookup이 실패해도 이미 source-backed인 cross-CIK document resolution 자체는 무효화하지 않고 warning으로 남긴다.
+`cross_cik_graph.json`에는 발견된 CIK들의 cutoff-safe `legal_name_alias_graphs`도 함께 frozen 된다.
 
 ## Workspace artifacts
 
@@ -216,17 +274,7 @@ cross_cik_graph.json
 
 그리고 동일 내용이 frozen `research_packet.json`에도 들어간다.
 
-`distressed-equity-sec-instruments`에서는 독립적으로 다음을 출력할 수 있다.
-
-```bash
-distressed-equity-sec-instruments \
-  --ticker META \
-  --analysis-date 2020-12-31 \
-  --legal-name-output output/legal_name_alias_graph.json \
-  --graph-output output/source_document_graph.json \
-  --cross-cik-output output/cross_cik_graph.json \
-  -o output/debt_instrument_sources.json
-```
+자세한 complete-header parser/reconciliation 규칙은 [`SEC_COMPLETE_SUBMISSION_NAME_HEADERS.md`](SEC_COMPLETE_SUBMISSION_NAME_HEADERS.md)를 참고한다.
 
 ## 의도적으로 하지 않는 것
 
@@ -236,11 +284,12 @@ distressed-equity-sec-instruments \
 - cutoff 이후 rename을 과거 계약에 적용
 - SEC metadata boundary를 법률적 name-change effective date로 단정
 - CIK가 다른 두 법인을 이름 alias만으로 합치기
+- complete header의 다른 entity section 이름을 target CIK에 합치기
 
 ## Known limitations
 
-1. submissions `formerNames`가 모든 역사적 법적 이름 변화를 완벽히 표현한다고 가정하지 않는다.
-2. filing complete-submission header의 `FORMER CONFORMED NAME` / `DATE OF NAME CHANGE`를 별도 교차검증하는 레이어는 아직 없다.
+1. complete-header fallback은 최근 cutoff-safe filing 3개를 기본 sample로 사용한다. 아주 오래된 history가 최근 header에서 빠지는 issuer는 추가 historical scan이 필요할 수 있다.
+2. SEC submissions와 filing header 자체가 불일치할 수 있으며, 이 경우 `boundary_conflict`와 provenance를 남기고 자동 법률 판단은 하지 않는다.
 3. merger, conversion, reincorporation, successor/novation처럼 **CIK continuity 자체로 설명되지 않는 법적 succession**은 name alias와 별개의 문제다.
 4. foreign CIK 내부의 locator-less contract fallback을 그 foreign CIK의 alias graph로 다시 실행하는 단계는 별도 확장 대상이다.
 
