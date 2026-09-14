@@ -102,17 +102,15 @@ def enhance_expanded_packet_with_contract_identity(
     contract_days_before_execution: int = 30,
     contract_days_after_execution: int = 550,
     max_candidates_per_exhibit: int = 20,
+    alias_groups: Iterable[Iterable[str]] = (),
 ) -> ExpandedInstrumentPacket:
     """Resolve locator-less references by contract kind/date and optional parties.
 
-    This is deliberately a fallback layer. A contract identity is only linked when
-    exactly one SEC exhibit within the bounded historical search window contains
-    the same canonical contract kind and exact execution date. If the source also
-    exposes borrower/issuer/guarantor fingerprints, those are hard filters. Thus
-    two same-day facilities with different obligors remain separate identities.
-    Multiple matches are never ranked to a winner.
+    `alias_groups` must come from an authoritative identity graph (for example the
+    SEC former-name graph). This layer never creates fuzzy legal-name aliases.
     """
 
+    alias_groups = tuple(tuple(group) for group in alias_groups)
     graph = expanded.graph
     packet = expanded.packet
     all_filings = client.filings_as_of(cik, packet.analysis_date, forms=REFERENCE_FORMS)
@@ -126,9 +124,6 @@ def enhance_expanded_packet_with_contract_identity(
     index_cache: dict[str, tuple] = {}
     text_cache: dict[str, str] = {}
 
-    # Preserve existing explicit-reference resolutions. Contract identity fallback
-    # is keyed by parties too, so same-kind/same-date facilities with different
-    # obligors are never silently deduplicated.
     seen_identity_keys: set[tuple[str, str, date, tuple[tuple[str, str], ...]]] = set()
     for reference in references:
         for identity in extract_contract_identities(reference.reference_text):
@@ -167,13 +162,11 @@ def enhance_expanded_packet_with_contract_identity(
                     days_after_execution=contract_days_after_execution,
                     index_cache=index_cache,
                     text_cache=text_cache,
+                    alias_groups=alias_groups,
                 )
                 warnings.extend(search.warnings)
                 candidates = [item for item in search.candidates if item.url != source.url]
 
-                # A contract exhibit normally states its own title and execution
-                # date. Do not turn that self-description into a fake unresolved
-                # reference edge when the reverse search finds only the source.
                 if search.candidates and not candidates and all(item.url == source.url for item in search.candidates):
                     continue
 
@@ -190,9 +183,7 @@ def enhance_expanded_packet_with_contract_identity(
                             reference_id=reference.reference_id,
                             to_node_id=None,
                             status="unresolved_contract_identity",
-                            reason=(
-                                f"no SEC exhibit matched {descriptor} within bounded historical search"
-                            ),
+                            reason=f"no SEC exhibit matched {descriptor} within bounded historical search",
                         )
                     )
                     continue
@@ -204,9 +195,7 @@ def enhance_expanded_packet_with_contract_identity(
                             reference_id=reference.reference_id,
                             to_node_id=None,
                             status="ambiguous_contract_identity",
-                            reason=(
-                                f"{len(candidates)} SEC exhibits matched {descriptor}; no automatic selection"
-                            ),
+                            reason=f"{len(candidates)} SEC exhibits matched {descriptor}; no automatic selection",
                         )
                     )
                     continue
@@ -246,9 +235,6 @@ def enhance_expanded_packet_with_contract_identity(
                 )
                 made_progress = True
 
-                # Once a locator-less reference is resolved, let the existing
-                # explicit-reference resolver walk any references inside that old
-                # exhibit. Depth is adjusted back into the parent graph.
                 remaining_depth = max_depth - target_depth
                 if remaining_depth > 0:
                     try:
