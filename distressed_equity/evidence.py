@@ -13,6 +13,7 @@ class EvidenceRecord:
     event_on: date | None = None
     locator: str | None = None
     notes: str | None = None
+    evidence_id: str | None = None
 
 
 def validate_point_in_time(records: tuple[EvidenceRecord, ...], analysis_date: date) -> tuple[str, ...]:
