@@ -24,6 +24,8 @@ transformation-scanner = "transformation_scanner.cli:main"
 distressed-equity = "distressed_equity.cli:main"
 distressed-equity-screen = "distressed_equity.screen_cli:main"
 distressed-equity-sec = "distressed_equity.sec_cli:main"
+distressed-equity-sec-debt = "distressed_equity.sec_debt_cli:main"
+distressed-equity-ingest = "distressed_equity.agent_ingest_cli:main"
 distressed-equity-replay = "distressed_equity.replay_cli:main"
 distressed-equity-base-rates = "distressed_equity.base_rate_cli:main"
 
