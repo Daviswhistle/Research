@@ -12,6 +12,7 @@ from .cross_cik import cross_cik_graph_to_dict, expand_packet_with_cross_cik
 from .legal_name_alias import (
     alias_groups_from_graphs,
     build_legal_name_alias_graph,
+    build_legal_name_alias_graphs,
     legal_name_alias_graph_to_dict,
 )
 from .sec import SecClient
@@ -157,6 +158,22 @@ def main(argv: list[str] | None = None) -> int:
             )
             packet = cross_expanded.packet
             cross_cik_payload = cross_cik_graph_to_dict(cross_expanded.cross_cik_graph)
+            encountered_ciks = {
+                item.cik for item in cross_expanded.cross_cik_graph.entity_nodes
+            } | {
+                item.target_cik for item in cross_expanded.cross_cik_graph.references
+            } | {snapshot.cik}
+            legal_graphs, legal_warnings = build_legal_name_alias_graphs(
+                client,
+                ciks=encountered_ciks,
+                analysis_date=cutoff,
+                existing=(legal_name_graph,),
+            )
+            cross_cik_payload["legal_name_alias_graphs"] = [
+                legal_name_alias_graph_to_dict(item) for item in legal_graphs
+            ]
+            if legal_warnings:
+                cross_cik_payload.setdefault("warnings", []).extend(legal_warnings)
         else:
             packet = expanded.packet
 
