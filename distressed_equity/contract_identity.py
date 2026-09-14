@@ -39,6 +39,7 @@ _NUMERIC_CONTRACT_DATE_RE = re.compile(
     r"(?P<month>\d{1,2})/(?P<day>\d{1,2})/(?P<year>20\d{2})\b",
     re.IGNORECASE,
 )
+_MODIFICATION_TERMS = ("amendment", "waiver", "supplement", "joinder", "consent")
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,16 @@ def _canonical_kind(title: str) -> str:
     return "credit_agreement"
 
 
+def _is_restated_title(title: str) -> bool:
+    lower = re.sub(r"\s+", " ", title.lower()).strip()
+    return "amended and restated" in lower or lower.startswith("restated ")
+
+
+def _document_is_modification(document: FilingDocument) -> bool:
+    text = f"{document.description} {document.document}".lower()
+    return any(term in text for term in _MODIFICATION_TERMS)
+
+
 def _parse_date_after(text: str, start: int, *, max_gap: int = 80) -> date | None:
     tail = text[start : start + max_gap]
     match = _CONTRACT_DATE_RE.search(tail)
@@ -99,14 +110,14 @@ def _parse_date_after(text: str, start: int, *, max_gap: int = 80) -> date | Non
 def extract_contract_identities(text: str) -> tuple[ContractIdentity, ...]:
     plain = html_to_text(text)
     identities: list[ContractIdentity] = []
-    seen: set[tuple[str, date]] = set()
+    seen: set[tuple[str, date, bool]] = set()
     for match in _CONTRACT_TITLE_RE.finditer(plain):
         execution_date = _parse_date_after(plain, match.end())
         if execution_date is None:
             continue
         title = re.sub(r"\s+", " ", match.group("title")).strip()
         kind = _canonical_kind(title)
-        key = (kind, execution_date)
+        key = (kind, execution_date, _is_restated_title(title))
         if key in seen:
             continue
         seen.add(key)
@@ -115,8 +126,13 @@ def extract_contract_identities(text: str) -> tuple[ContractIdentity, ...]:
 
 
 def _identity_matches(target: ContractIdentity, text: str) -> bool:
+    target_restated = _is_restated_title(target.title)
     for identity in extract_contract_identities(text):
-        if identity.execution_date == target.execution_date and identity.kind == target.kind:
+        if (
+            identity.execution_date == target.execution_date
+            and identity.kind == target.kind
+            and _is_restated_title(identity.title) == target_restated
+        ):
             return True
     return False
 
@@ -139,6 +155,11 @@ def reverse_search_contract_identity(
     A result can therefore be filed later (for example in a 10-Q), but never after
     the referencing source document. Multiple matching exhibits are intentionally
     returned as ambiguous candidates rather than ranked to a winner.
+
+    Modification exhibits are excluded when resolving an original agreement, so
+    an amendment that merely quotes the original agreement's title/date cannot be
+    mistaken for the original contract. Restated agreements are matched only to
+    restated contract identities.
     """
 
     if max_filings <= 0:
@@ -168,6 +189,7 @@ def reverse_search_contract_identity(
     matches: list[FilingDocument] = []
     warnings: list[str] = []
     searched: list[str] = []
+    target_restated = _is_restated_title(identity.title)
     for filing in candidates_filings:
         searched.append(filing.accession_number)
         documents = index_cache.get(filing.accession_number)
@@ -184,6 +206,7 @@ def reverse_search_contract_identity(
             document
             for document in documents
             if document.document_type.upper().startswith(("EX-4", "EX-10"))
+            and (target_restated or not _document_is_modification(document))
         ]
         for document in debt_documents:
             try:
