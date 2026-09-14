@@ -7,12 +7,13 @@ from pathlib import Path
 from typing import Any
 
 from .agent_results import agent_result_from_dict, validate_agent_result
-from .covenants import covenant_model_to_dict
+from .covenant_sensitivity import calculate_covenant_addback_sensitivity, covenant_sensitivity_to_dict
+from .covenants import covenant_model_from_dict, covenant_model_to_dict
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Calculate covenant EBITDA/headroom and emit an ingestible covenant patch"
+        description="Calculate covenant EBITDA/headroom, sensitivity, and an ingestible covenant patch"
     )
     parser.add_argument("input", help="JSON file containing analysis_date, evidence and covenant models")
     parser.add_argument("--output", "-o", help="JSON output path; stdout when omitted")
@@ -68,8 +69,20 @@ def build_covenant_agent_result(payload: dict[str, Any]) -> dict[str, Any]:
         if unknown:
             raise ValueError(f"model {idx} references unknown evidence IDs: {sorted(unknown)}")
         all_refs.update(refs)
+
+        definition, bridge, inputs = covenant_model_from_dict(raw)
+        sensitivity = calculate_covenant_addback_sensitivity(definition, bridge, inputs)
+        result["addback_sensitivity"] = covenant_sensitivity_to_dict(sensitivity)
         modeled.append(result)
-        covenant_risks.append(result["screening_covenant_risk"])
+
+        risk = dict(result["screening_covenant_risk"])
+        risk_notes = list(risk.get("notes", []))
+        if sensitivity.classification == "disputed_addbacks_flip_outcome":
+            risk_notes.append("compliance depends on disputed EBITDA add-backs")
+        elif sensitivity.classification == "robust_breach":
+            risk_notes.append("breach persists across modeled disputed-add-back cases")
+        risk["notes"] = risk_notes
+        covenant_risks.append(risk)
 
     raw_result = {
         "schema_version": "1",
@@ -83,7 +96,7 @@ def build_covenant_agent_result(payload: dict[str, Any]) -> dict[str, Any]:
                 "value": covenant_risks,
                 "evidence_refs": sorted(all_refs),
                 "confidence": str(payload.get("confidence") or "medium"),
-                "rationale": "Deterministic covenant headroom calculation from source-backed covenant definitions and inputs.",
+                "rationale": "Deterministic covenant headroom and disputed-add-back sensitivity from source-backed definitions and inputs.",
             }
         ],
         "unresolved": list(payload.get("unresolved", [])),
