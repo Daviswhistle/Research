@@ -78,8 +78,28 @@ def normalize_party_name(name: str) -> str:
     return cleaned
 
 
+def _trim_captured_party_name(raw: str) -> str:
+    """Discard clause text accidentally captured before the final legal entity."""
+
+    name = re.sub(r"\s+", " ", raw).strip(" ,")
+    # Prefer the last sentence/clause because the regex is suffix-anchored on the
+    # legal entity but can begin too early in prose such as
+    # "Credit Agreement dated ... ABC Borrower LLC, as Borrower".
+    for separator in (". ", "; "):
+        if separator in name:
+            name = name.rsplit(separator, 1)[-1].strip(" ,")
+    lower = name.lower()
+    for marker in (" among ", " between ", " by ", " with "):
+        position = lower.rfind(marker)
+        if position >= 0:
+            name = name[position + len(marker) :].strip(" ,")
+            lower = name.lower()
+    name = re.sub(r"^(?:and|among|between|by|with)\s+", "", name, flags=re.IGNORECASE).strip(" ,")
+    return name
+
+
 def _party_from_match(match: re.Match[str]) -> ContractParty | None:
-    name = re.sub(r"\s+", " ", match.group("name")).strip(" ,")
+    name = _trim_captured_party_name(match.group("name"))
     normalized = normalize_party_name(name)
     if not normalized or normalized in _GENERIC_PARTY_NAMES:
         return None
