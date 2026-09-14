@@ -23,6 +23,12 @@ from .sec_debt import (
     build_capital_stack_packet,
     capital_stack_packet_to_dict,
 )
+from .sec_instruments import (
+    build_instrument_verification_task,
+    build_sec_instrument_packet,
+    instrument_verification_template,
+    sec_instrument_packet_to_dict,
+)
 
 
 @dataclass(frozen=True)
@@ -94,6 +100,9 @@ def build_research_bundle(
     cik: str | int | None = None,
     filing_limit: int = 3,
     max_snippets_per_filing: int = 50,
+    instrument_filing_limit: int = 6,
+    max_instrument_exhibits_per_filing: int = 6,
+    max_instrument_candidates_per_exhibit: int = 20,
     market_provider: HistoricalMarketProvider | None = None,
     history_years: int = 5,
 ) -> ResearchBundle:
@@ -101,8 +110,8 @@ def build_research_bundle(
         analysis_date=analysis_date,
         ticker=ticker,
         cik=cik,
-        forms=("10-K", "10-K/A", "10-Q", "10-Q/A", "8-K"),
-        filing_limit=max(filing_limit * 4, 20),
+        forms=("10-K", "10-K/A", "10-Q", "10-Q/A", "8-K", "8-K/A"),
+        filing_limit=max(filing_limit * 4, instrument_filing_limit * 2, 20),
     )
     evidence = list(snapshot_to_evidence(snapshot))
     screening_draft = build_screening_draft(snapshot)
@@ -121,8 +130,21 @@ def build_research_bundle(
     warnings.extend(capital_stack.warnings)
     warnings.extend(diff.warnings)
 
+    instrument_packet = build_sec_instrument_packet(
+        sec_client,
+        ticker=snapshot.ticker,
+        company_name=snapshot.company_name,
+        analysis_date=analysis_date,
+        filings=snapshot.filings,
+        filing_limit=instrument_filing_limit,
+        max_exhibits_per_filing=max_instrument_exhibits_per_filing,
+        max_candidates_per_exhibit=max_instrument_candidates_per_exhibit,
+    )
+    warnings.extend(instrument_packet.warnings)
+
     tasks = [task for task in build_sec_prefill_tasks(snapshot) if task.name != "capital_stack_extractor"]
     tasks.insert(0, build_capital_stack_agent_task(capital_stack))
+    instrument_task = build_instrument_verification_task(instrument_packet)
 
     market_payload = None
     if market_provider is not None and snapshot.ticker:
@@ -154,6 +176,13 @@ def build_research_bundle(
         "screening_draft": screening_draft,
         "capital_stack_packet": capital_stack_packet_to_dict(capital_stack),
         "capital_stack_diff": capital_stack_diff_to_dict(diff),
+        "debt_instrument_source_packet": sec_instrument_packet_to_dict(instrument_packet),
+        "debt_instrument_verification": {
+            "task": _jsonable(instrument_task),
+            "result_template": instrument_verification_template(instrument_packet),
+            "result_kind": "debt_instrument_snapshots",
+            "ingestion_target": "distressed-equity-debt-ledger",
+        },
         "market_snapshot": market_payload,
         "agent_tasks": [
             {
@@ -205,6 +234,7 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
     packet = bundle.packet
     draft = packet["screening_draft"]["screening_candidate_draft"]
     diff = packet.get("capital_stack_diff") or {}
+    source_packet = packet.get("debt_instrument_source_packet") or {}
     lines = [
         f"# {bundle.company_name} ({bundle.ticker or 'CIK'}) research workspace",
         "",
@@ -215,14 +245,18 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
         f"- SEC filing/XBRL evidence rows: {len(packet.get('evidence', []))}",
         f"- Capital-stack snippets: {len((packet.get('capital_stack_packet') or {}).get('snippets', []))}",
         f"- Filing-to-filing change candidates: {len(diff.get('changes', []))}",
+        f"- Debt-relevant SEC exhibit documents: {len(source_packet.get('documents', []))}",
+        f"- Source-backed debt instrument candidates: {len(source_packet.get('candidates', []))}",
         f"- Cutoff share price: {draft.get('capital_structure', {}).get('current_price')}",
         "",
         "## Research loop",
         "",
-        "1. Review capital-stack amendment candidates against source filings.",
-        "2. Have agents return the supplied structured result templates.",
-        "3. Use `distressed-equity-covenant` for source-backed maintenance-covenant EBITDA/headroom arithmetic.",
-        "4. Re-run this command with `--result` files or call `distressed-equity-ingest`.",
+        "1. Review filing-to-filing capital-stack changes against source filings.",
+        "2. Review `debt_instrument_template.json`; verify/delete candidate fields against cited exhibit spans.",
+        "3. Feed verified snapshots to `distressed-equity-debt-ledger` for stable instrument identity and amendment tracking.",
+        "4. Have screening agents return the supplied structured result templates.",
+        "5. Use `distressed-equity-covenant` for source-backed maintenance-covenant EBITDA/headroom arithmetic.",
+        "6. Re-run this command with `--result` files or call `distressed-equity-ingest`.",
         "",
     ]
     if merged is not None:
