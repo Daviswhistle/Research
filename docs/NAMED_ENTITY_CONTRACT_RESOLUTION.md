@@ -19,7 +19,7 @@ Target Finance LLC, as Borrower.
 candidate generation != identity confirmation != contract resolution
 ```
 
-현재 SEC registry에서 이름이 같다는 이유만으로 CIK를 확정하지 않는다.
+현재 SEC registry나 누적 CIK/name 파일에서 이름이 같다는 이유만으로 CIK를 확정하지 않는다.
 
 자동 resolution에는 세 단계가 모두 필요하다.
 
@@ -56,16 +56,17 @@ Credit Agreement dated May 3, 2019
 
 - 이미 SEC evidence로 확보된 `legal_name_alias_graph`
 - SEC `company_tickers.json`에서 **exact normalized legal-name**이 일치하는 title
+- SEC 공식 누적 CIK/name 파일 `https://www.sec.gov/Archives/edgar/cik-lookup-data.txt`에서 **exact normalized legal-name**이 일치하는 filer name
 
-`company_tickers.json`은 현재 시점 lookup aid이므로 historical identity authority로 취급하지 않는다.
+SEC는 `cik-lookup-data.txt`를 모든 CIK와 entity name의 현재 목록으로 제공하며, 이름 변경 때문에 하나의 CIK가 여러 역사적 이름과 연결될 수 있고 더 이상 filing하지 않는 entity도 포함할 수 있다고 설명한다. 이 특성은 ticker가 없는 finance subsidiary, private filer, historical filer의 후보 CIK를 생성하는 데 유용하지만 historical identity authority 그 자체는 아니다.
 
-후보 source는 명시적으로:
+후보 source는 각각 명시적으로 구분한다.
 
 ```text
+known_sec_legal_name_graph
 sec_company_tickers_candidate_only
+sec_cik_lookup_data_candidate_only
 ```
-
-로 기록된다.
 
 다음은 허용하지 않는다.
 
@@ -77,6 +78,24 @@ Target Finance LLC
 ```
 
 문장 유사도, token similarity, edit distance, embedding, parent/subsidiary 추론은 사용하지 않는다.
+
+### 누적 CIK 파일 파싱
+
+SEC 파일은 기본적으로:
+
+```text
+ENTITY NAME:CIK:
+```
+
+형식이다. Entity name 자체에 colon이 포함될 수 있으므로 왼쪽 `split(":")`을 쓰지 않고 trailing colon을 제거한 뒤 오른쪽에서 CIK를 분리한다.
+
+예:
+
+```text
+11:11 CAPITAL CORP.:0001463262:
+```
+
+또한 이 파일은 대용량이므로 전체 100만 행 수준 registry를 Python dict로 영구 확장하지 않는다. 먼저 research packet의 source documents에서 필요한 normalized party name 집합을 수집한 뒤, SEC 파일을 한 번 선형 스캔해 그 이름들만 추출한다. Raw response는 같은 `SecClient` 인스턴스에서 캐시해 반복 다운로드를 막는다.
 
 ## 3. Source-date SEC confirmation
 
@@ -94,7 +113,7 @@ Legal-name graph는 기존과 동일하게 다음을 사용한다.
 - `FORMER CONFORMED NAME`
 - `DATE OF NAME CHANGE`
 
-따라서 오늘의 SEC registry title이 과거 source date에는 아직 사용되지 않았던 이름이면 후보는 확인되지 않는다.
+따라서 오늘의 ticker registry나 누적 CIK/name 파일에 이름이 존재해도 과거 source date의 SEC evidence가 해당 이름을 확인하지 않으면 후보는 탈락한다.
 
 ## 4. Contract confirmation
 
@@ -200,24 +219,34 @@ global_depth = entry_global_depth + local_node.depth
 
 를 사용한다. `reference_depth` 밖의 node는 named-entity scan 대상이 아니다.
 
-## Current false-negative boundary
+## Coverage improvement
 
-현재 SEC `company_tickers.json`은 candidate generation source 중 하나일 뿐이며 전체 SEC filer registry가 아니다. 따라서 다음은 의도적으로 놓칠 수 있다.
+`company_tickers.json`만 사용할 때 놓치던 다음 후보를 이제 `cik-lookup-data.txt`에서 생성할 수 있다.
 
-- 비상장 private filer
-- ticker mapping에 없는 finance subsidiary
-- 과거에는 filing했지만 현재 ticker registry에서 사라진 entity
-- 이름이 변경돼 현재 title과 source name이 직접 일치하지 않는 후보 중 아직 legal-name graph를 확보하지 못한 CIK
+- 비상장/private SEC filer
+- ticker가 없는 finance subsidiary
+- 현재 ticker map에 없는 historical filer
+- 과거 이름으로만 누적 CIK registry에 남아 있는 filer
 
-이를 해결하기 위해 fuzzy web/company search를 도입하지 않는다.
+단, 이 파일에는 funds와 individuals도 포함되고 historically cumulative이므로 exact name hit 자체는 신뢰 신호가 아니다. 기존 source-date confirmation과 unique-contract confirmation이 반드시 뒤따른다.
 
-다음 확장은 **SEC 공식 source에서 비상장/비ticker filer candidate CIK를 생성하는 방법**이어야 하며, source-date name confirmation + unique contract confirmation 규칙은 그대로 유지해야 한다.
+## Remaining false-negative boundary
+
+모든 name-only entity가 해결되는 것은 아니다.
+
+- SEC 누적 CIK/name 목록에도 해당 이름이 없는 경우
+- source contract가 약칭/trade name만 쓰고 legal name을 쓰지 않은 경우
+- source-date legal-name evidence가 최근 complete-submission header 범위 밖에 있어 확인되지 않는 경우
+- target filer가 public EDGAR filing history를 갖지 않아 contract confirmation이 불가능한 경우
+
+이 경계는 fuzzy web/company search로 메우지 않는다.
 
 ## Safety properties
 
 - 일반 회사명 언급만으로 CIK 경계를 넘지 않음
 - fuzzy name matching 없음
 - current ticker mapping 단독으로 CIK 확정하지 않음
+- cumulative CIK/name hit 단독으로 CIK 확정하지 않음
 - source-date filing existence 필요
 - source-date legal-name confirmation 필요
 - contract identity + party hard-filter 필요
@@ -225,4 +254,13 @@ global_depth = entry_global_depth + local_node.depth
 - explicit cross-CIK provenance와 별도 보존
 - resolved exhibit도 authoritative debt row로 직접 승격하지 않음
 
-이 설계의 목표는 recall을 최대화하는 것이 아니라, SEC provenance를 유지하면서 name-only external contract party 때문에 생기는 고가치 false negative를 제한적으로 제거하는 것이다.
+현재 다음 구조가 유지된다.
+
+```text
+SEC cumulative all-CIK candidate
+    -> source-date SEC identity confirmation
+    -> unique historical contract confirmation
+    -> source-backed debt extraction
+```
+
+이 설계의 목표는 recall을 무제한으로 높이는 것이 아니라, SEC provenance를 유지하면서 ticker가 없는 filer와 historical legal name 때문에 생기는 고가치 false negative를 제한적으로 제거하는 것이다.
