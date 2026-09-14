@@ -9,6 +9,11 @@ from typing import Any
 
 from .contract_graph import enhance_expanded_packet_with_contract_identity
 from .cross_cik import cross_cik_graph_to_dict, expand_packet_with_cross_cik
+from .legal_name_alias import (
+    alias_groups_from_graphs,
+    build_legal_name_alias_graph,
+    legal_name_alias_graph_to_dict,
+)
 from .sec import SecClient
 from .sec_instruments import (
     build_instrument_verification_task,
@@ -56,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not follow explicit foreign-CIK SEC Archives/CIK references",
     )
     parser.add_argument("--output", "-o", help="Expanded source packet JSON path; stdout when omitted")
+    parser.add_argument("--legal-name-output", help="Optional point-in-time SEC legal-name alias graph JSON path")
     parser.add_argument("--graph-output", help="Optional same-CIK source-document graph JSON path")
     parser.add_argument("--cross-cik-output", help="Optional cross-CIK legal-entity/source graph JSON path")
     parser.add_argument("--task-output", help="Optional verification task JSON path")
@@ -96,6 +102,12 @@ def main(argv: list[str] | None = None) -> int:
         forms=("10-K", "10-K/A", "10-Q", "10-Q/A", "8-K", "8-K/A"),
         filing_limit=max(args.filing_limit * 3, args.filing_limit),
     )
+    legal_name_graph = build_legal_name_alias_graph(
+        client,
+        cik=snapshot.cik,
+        analysis_date=cutoff,
+    )
+    alias_groups = alias_groups_from_graphs((legal_name_graph,))
     packet = build_sec_instrument_packet(
         client,
         ticker=snapshot.ticker,
@@ -131,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
                 contract_days_before_execution=args.contract_days_before_execution,
                 contract_days_after_execution=args.contract_days_after_execution,
                 max_candidates_per_exhibit=args.max_candidates_per_exhibit,
+                alias_groups=alias_groups,
             )
         graph_payload = source_document_graph_to_dict(expanded.graph)
         if not args.no_cross_cik:
@@ -148,6 +161,8 @@ def main(argv: list[str] | None = None) -> int:
             packet = expanded.packet
 
     _write(args.output, sec_instrument_packet_to_dict(packet))
+    if args.legal_name_output:
+        _write(args.legal_name_output, legal_name_alias_graph_to_dict(legal_name_graph))
     if args.graph_output and graph_payload is not None:
         _write(args.graph_output, graph_payload)
     if args.cross_cik_output and cross_cik_payload is not None:
