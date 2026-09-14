@@ -14,6 +14,10 @@ from .sec_instruments import (
     instrument_verification_template,
     sec_instrument_packet_to_dict,
 )
+from .source_graph import (
+    expand_instrument_packet_with_references,
+    source_document_graph_to_dict,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,7 +32,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--filing-limit", type=int, default=12)
     parser.add_argument("--max-exhibits-per-filing", type=int, default=8)
     parser.add_argument("--max-candidates-per-exhibit", type=int, default=20)
-    parser.add_argument("--output", "-o", help="Source packet JSON path; stdout when omitted")
+    parser.add_argument("--reference-depth", type=int, default=3)
+    parser.add_argument("--reference-max-nodes", type=int, default=80)
+    parser.add_argument(
+        "--no-resolve-references",
+        action="store_true",
+        help="Do not follow incorporation-by-reference links to older SEC filings/exhibits",
+    )
+    parser.add_argument("--output", "-o", help="Expanded source packet JSON path; stdout when omitted")
+    parser.add_argument("--graph-output", help="Optional source-document graph JSON path")
     parser.add_argument("--task-output", help="Optional verification task JSON path")
     parser.add_argument("--template-output", help="Optional ledger-ready verification template JSON path")
     return parser
@@ -77,7 +89,24 @@ def main(argv: list[str] | None = None) -> int:
         max_exhibits_per_filing=args.max_exhibits_per_filing,
         max_candidates_per_exhibit=args.max_candidates_per_exhibit,
     )
+
+    graph_payload = None
+    if not args.no_resolve_references:
+        expanded = expand_instrument_packet_with_references(
+            client,
+            packet=packet,
+            cik=snapshot.cik,
+            seed_filings=snapshot.filings,
+            max_depth=args.reference_depth,
+            max_nodes=args.reference_max_nodes,
+            max_candidates_per_exhibit=args.max_candidates_per_exhibit,
+        )
+        packet = expanded.packet
+        graph_payload = source_document_graph_to_dict(expanded.graph)
+
     _write(args.output, sec_instrument_packet_to_dict(packet))
+    if args.graph_output and graph_payload is not None:
+        _write(args.graph_output, graph_payload)
 
     if args.task_output:
         _write(
