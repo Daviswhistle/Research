@@ -105,6 +105,7 @@ def test_bundle_connects_sec_debt_diff_market_and_task_templates():
         ticker="TEST",
         analysis_date=date(2022, 12, 31),
         market_provider=FakeMarketProvider(),
+        resolve_incorporated_references=False,
     )
     packet = bundle.packet
     assert packet["screening_draft"]["screening_candidate_draft"]["capital_structure"]["current_price"] == 2.0
@@ -116,6 +117,7 @@ def test_bundle_connects_sec_debt_diff_market_and_task_templates():
     assert "historical_market_reconstructor" in names
     assert all("result_template" in item for item in packet["agent_tasks"])
     assert packet["point_in_time_violations"] == []
+    assert packet["source_document_graph"] is None
 
 
 def test_summary_makes_resume_path_explicit():
@@ -123,6 +125,7 @@ def test_summary_makes_resume_path_explicit():
         FakeSecClient(),
         ticker="TEST",
         analysis_date=date(2022, 12, 31),
+        resolve_incorporated_references=False,
     )
     summary = render_research_summary(bundle)
     assert "distressed-equity-covenant" in summary
@@ -134,6 +137,7 @@ def test_frozen_packet_refuses_a_different_cutoff():
         FakeSecClient(),
         ticker="TEST",
         analysis_date=date(2022, 12, 31),
+        resolve_incorporated_references=False,
     )
     restored = _bundle_from_frozen_packet(bundle.packet, date(2022, 12, 31))
     assert restored.company_name == "Test Co"
