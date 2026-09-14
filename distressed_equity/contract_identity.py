@@ -115,12 +115,6 @@ def _parse_date_after(text: str, start: int, *, max_gap: int = 80) -> date | Non
 
 
 def _party_context(text: str, start: int, end: int) -> str:
-    """Keep party extraction local to one agreement mention.
-
-    This intentionally prefers false negatives over leaking a borrower from the
-    next sentence/facility into the current contract fingerprint.
-    """
-
     left_floor = max(0, start - 500)
     left_slice = text[left_floor:start]
     left_markers = [left_slice.rfind("\n"), left_slice.rfind(". ")]
@@ -163,14 +157,23 @@ def extract_contract_identities(text: str) -> tuple[ContractIdentity, ...]:
     return tuple(identities)
 
 
-def _identity_matches(target: ContractIdentity, text: str) -> bool:
+def _identity_matches(
+    target: ContractIdentity,
+    text: str,
+    *,
+    alias_groups: Iterable[Iterable[str]] = (),
+) -> bool:
     target_restated = _is_restated_title(target.title)
     for identity in extract_contract_identities(text):
         if (
             identity.execution_date == target.execution_date
             and identity.kind == target.kind
             and _is_restated_title(identity.title) == target_restated
-            and contract_parties_compatible(target.parties, identity.parties)
+            and contract_parties_compatible(
+                target.parties,
+                identity.parties,
+                alias_groups=alias_groups,
+            )
         ):
             return True
     return False
@@ -187,22 +190,12 @@ def reverse_search_contract_identity(
     days_after_execution: int = 550,
     index_cache: dict[str, tuple[FilingDocument, ...]] | None = None,
     text_cache: dict[str, str] | None = None,
+    alias_groups: Iterable[Iterable[str]] = (),
 ) -> ContractSearchResult:
     """Search historical SEC exhibits for a unique contract identity match.
 
-    Core identity is canonical contract kind + exact execution date. If the source
-    mention explicitly names borrower/issuer/guarantor entities, those party
-    fingerprints become hard filters rather than fuzzy score boosts. A candidate
-    that cannot independently confirm the required party is not auto-resolved.
-
-    The execution date is contract identity evidence, not filing date. A result
-    can therefore be filed later (for example in a 10-Q), but never after the
-    referencing source document. Multiple matches remain ambiguous.
-
-    Modification exhibits are excluded when resolving an original agreement, so
-    an amendment that merely quotes the original agreement's title/date cannot be
-    mistaken for the original contract. Restated agreements are matched only to
-    restated contract identities.
+    Party aliases are permitted only when supplied by an authoritative identity
+    graph. No fuzzy legal-name matching is performed here.
     """
 
     if max_filings <= 0:
@@ -210,6 +203,7 @@ def reverse_search_contract_identity(
     if days_before_execution < 0 or days_after_execution < 0:
         raise ValueError("contract search windows cannot be negative")
 
+    alias_groups = tuple(tuple(group) for group in alias_groups)
     index_cache = index_cache if index_cache is not None else {}
     text_cache = text_cache if text_cache is not None else {}
     lower_bound = identity.execution_date - timedelta(days=days_before_execution)
@@ -260,7 +254,7 @@ def reverse_search_contract_identity(
             except Exception as exc:
                 warnings.append(f"failed contract-identity document lookup for {document.document}: {exc}")
                 continue
-            if _identity_matches(identity, document_text):
+            if _identity_matches(identity, document_text, alias_groups=alias_groups):
                 matches.append(document)
 
     unique: dict[str, FilingDocument] = {item.url: item for item in matches}
