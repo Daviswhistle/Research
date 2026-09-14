@@ -5,7 +5,7 @@ from datetime import date, datetime
 import re
 from typing import Any, Iterable
 
-from .sec import SecClient, SecFiling
+from .sec import SEC_WEB_BASE, SecClient, SecFiling
 from .sec_debt import html_to_text
 from .sec_instruments import (
     FilingDocument,
@@ -27,8 +27,8 @@ from .source_graph import (
 )
 
 _ARCHIVE_URL_RE = re.compile(
-    r"https?://(?:www\.)?sec\.gov/Archives/edgar/data/"
-    r"(?P<cik>\d{1,10})/(?P<accession>\d{18})/(?P<document>[^\s\"'<>?#]+)",
+    r"(?P<url>(?:https?://(?:www\.)?sec\.gov)?/Archives/edgar/data/"
+    r"(?P<cik>\d{1,10})/(?P<accession>\d{18})/(?P<document>[^\s\"'<>?#]+))",
     re.IGNORECASE,
 )
 _EXPLICIT_CIK_RE = re.compile(
@@ -151,6 +151,10 @@ def _accession_from_digits(digits: str) -> str:
     return f"{digits[:10]}-{digits[10:12]}-{digits[12:]}"
 
 
+def _absolute_archive_url(value: str) -> str:
+    return value if value.lower().startswith(("http://", "https://")) else f"{SEC_WEB_BASE}{value}"
+
+
 def _target_cik_from_source_reference(reference: SourceReference) -> str | None:
     if reference.cited_url:
         match = _ARCHIVE_URL_RE.search(reference.cited_url)
@@ -178,7 +182,7 @@ def _raw_archive_references(
         target_cik = normalize_cik_text(match.group("cik"))
         if target_cik == source_cik:
             continue
-        url = match.group(0)
+        url = _absolute_archive_url(match.group("url"))
         accession = _accession_from_digits(match.group("accession"))
         start = max(0, match.start() - 500)
         end = min(len(raw_text), match.end() + 500)
@@ -540,7 +544,6 @@ def resolve_cross_cik_graph(
                 )
             )
 
-            # Resolve ordinary same-CIK references inside the foreign document too.
             remaining_depth = max_depth - (depth + 1)
             if remaining_depth > 0:
                 try:
