@@ -139,6 +139,19 @@ distressed-equity-sec-debt \
 
 정규식으로 찾은 금액·연도·금리는 **후보**일 뿐 자동 debt schedule로 승격하지 않습니다. Filing-to-filing diff도 confirmed amendment가 아니라 금액/만기/비율 신호가 바뀐 위치를 알려주는 탐색 도구입니다.
 
+### Stable debt instrument ledger
+
+Filing마다 이름이 조금씩 달라지는 동일 채무를 추적하기 위해 instrument-level stable ID 레이어를 둡니다.
+
+```bash
+distressed-equity-debt-ledger debt_instruments.json \
+  -o debt_instrument_ledger.json
+```
+
+Matching 우선순위는 CUSIP/ISIN 같은 명시 identifier가 가장 높고, 없으면 instrument type, 이름 token, maturity, coupon, seniority/security를 이용합니다. Best/second-best 후보가 비슷하면 **억지로 같은 채무로 합치지 않고 새 stable ID**를 만듭니다.
+
+Ledger는 principal, maturity, pricing, ranking/security, revolver capacity/usage 변화를 instrument 단위로 보여줍니다. 이는 amendment 후보 탐색이며 법률적 동일성이나 amendment 효력을 자동 확정하지 않습니다.
+
 ### Covenant EBITDA / headroom
 
 Maintenance covenant는 계약 정의와 실제 계산을 분리합니다. 에이전트가 계약에서 permitted add-back, required deduction, cash-netting rule, springing trigger를 구조화하면 코드가 covenant EBITDA와 headroom을 계산합니다.
@@ -157,6 +170,8 @@ distressed-equity-covenant covenant_input.json \
 - minimum liquidity
 - springing revolver trigger
 - minimum EBITDA to comply / EBITDA cushion
+
+`disputed_add_backs`가 있으면 단일 ratio만 내지 않습니다. 모든 disputed add-back을 포함한 case, 전부 제외한 보수 case, 각 항목을 개별 제외한 case를 계산해 `covenant_ebitda_range`, `headroom_range`, breach sensitivity를 함께 보여줍니다. `disputed_addbacks_flip_outcome`은 compliance 결론이 계약 해석에 의존한다는 뜻이지 breach 확률을 의미하지 않습니다.
 
 출력의 `agent_result`는 `distressed-equity-ingest`에 그대로 넣을 수 있습니다. Add-back 허용 여부 자체를 코드가 추정하지 않는 것이 핵심입니다.
 
@@ -189,6 +204,16 @@ distressed-equity-research \
   --workspace output/cvna_2022-12-31
 ```
 
+Agent가 filing별 debt instrument snapshot을 구조화했다면 같은 workspace에서 stable ledger를 함께 만들 수 있습니다.
+
+```bash
+distressed-equity-research \
+  --ticker CVNA \
+  --analysis-date 2022-12-31 \
+  --workspace output/cvna_2022-12-31 \
+  --debt-instruments output/debt_instruments.json
+```
+
 Agent result가 준비되면 같은 workspace에서 재개합니다.
 
 ```bash
@@ -196,12 +221,13 @@ distressed-equity-research \
   --ticker CVNA \
   --analysis-date 2022-12-31 \
   --workspace output/cvna_2022-12-31 \
+  --debt-instruments output/debt_instruments.json \
   --result output/capital_stack_result.json \
   --result output/market_result.json \
   --result output/normalization_result.json
 ```
 
-기존 `research_packet.json`은 기본적으로 frozen input으로 재사용합니다. 데이터를 의도적으로 다시 수집하려면 `--refresh`를 사용합니다.
+기존 `research_packet.json`은 기본적으로 frozen input으로 재사용합니다. 데이터를 의도적으로 다시 수집하려면 `--refresh`를 사용합니다. Debt ledger는 후속 해석 artifact이므로 frozen packet을 수정하지 않고 `debt_instrument_ledger.json`과 `merged.json`에 별도로 저장됩니다.
 
 ### Survivorship-aware historical market replay
 
@@ -252,7 +278,9 @@ distressed-equity-base-rates cases.jsonl \
 - [`docs/DISTRESSED_EQUITY.md`](docs/DISTRESSED_EQUITY.md)
 - [`docs/SEC_EVIDENCE.md`](docs/SEC_EVIDENCE.md)
 - [`docs/SEC_CAPITAL_STACK.md`](docs/SEC_CAPITAL_STACK.md)
+- [`docs/DEBT_INSTRUMENT_LEDGER.md`](docs/DEBT_INSTRUMENT_LEDGER.md)
 - [`docs/COVENANT_HEADROOM.md`](docs/COVENANT_HEADROOM.md)
+- [`docs/COVENANT_SENSITIVITY.md`](docs/COVENANT_SENSITIVITY.md)
 - [`docs/AGENT_INGESTION.md`](docs/AGENT_INGESTION.md)
 - [`docs/ORCHESTRATION.md`](docs/ORCHESTRATION.md)
 - [`docs/MARKET_REPLAY.md`](docs/MARKET_REPLAY.md)
