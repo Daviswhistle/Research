@@ -8,12 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from .alpha_vantage import AlphaVantageProvider
-from .orchestration import (
-    ResearchBundle,
-    build_research_bundle,
-    ingest_research_bundle,
-    render_research_summary,
-)
+from .debt_instruments import build_debt_instrument_ledger, debt_instrument_ledger_to_dict, debt_snapshots_from_dict
+from .orchestration import ResearchBundle, build_research_bundle, ingest_research_bundle, render_research_summary
 from .sec import SecClient
 
 
@@ -43,6 +39,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Structured agent-result JSON; repeat to ingest multiple results",
     )
+    parser.add_argument(
+        "--debt-instruments",
+        help="Optional JSON containing filing-level debt instrument snapshots for stable-ID matching",
+    )
     parser.add_argument("--allow-overwrite", action="store_true")
     parser.add_argument("--apply-low-confidence", action="store_true")
     return parser
@@ -58,6 +58,14 @@ def _load_json(path: str | Path) -> dict[str, Any]:
         payload = json.load(handle)
     if not isinstance(payload, dict):
         raise ValueError(f"expected JSON object: {path}")
+    return payload
+
+
+def _load_json_any(path: str | Path) -> dict[str, Any] | list[dict[str, Any]]:
+    with Path(path).open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, (dict, list)):
+        raise ValueError(f"expected JSON object or list: {path}")
     return payload
 
 
@@ -112,6 +120,13 @@ def main(argv: list[str] | None = None) -> int:
         if bundle.packet.get("market_snapshot") is not None:
             _write_json(workspace / "market_snapshot.json", bundle.packet["market_snapshot"])
 
+    debt_ledger_payload = None
+    if args.debt_instruments:
+        snapshots = debt_snapshots_from_dict(_load_json_any(args.debt_instruments))
+        ledger = build_debt_instrument_ledger(snapshots)
+        debt_ledger_payload = debt_instrument_ledger_to_dict(ledger)
+        _write_json(workspace / "debt_instrument_ledger.json", debt_ledger_payload)
+
     merged = None
     if args.result:
         raw_results = [_load_json(path) for path in args.result]
@@ -121,11 +136,19 @@ def main(argv: list[str] | None = None) -> int:
             allow_overwrite=args.allow_overwrite,
             apply_low_confidence=args.apply_low_confidence,
         )
+        if debt_ledger_payload is not None:
+            merged["debt_instrument_ledger"] = debt_ledger_payload
         _write_json(workspace / "merged.json", merged)
 
-    (workspace / "summary.md").write_text(
-        render_research_summary(bundle, merged), encoding="utf-8"
-    )
+    summary = render_research_summary(bundle, merged)
+    if debt_ledger_payload is not None:
+        summary += (
+            "\n## Debt instrument identity ledger\n\n"
+            f"- Versions: {len(debt_ledger_payload['versions'])}\n"
+            f"- Amendment/change candidates: {len(debt_ledger_payload['changes'])}\n"
+            f"- New/unmatched stable IDs: {len(debt_ledger_payload['unmatched_versions'])}\n"
+        )
+    (workspace / "summary.md").write_text(summary, encoding="utf-8")
 
     print(workspace / "summary.md")
     if merged is not None and merged.get("errors"):
