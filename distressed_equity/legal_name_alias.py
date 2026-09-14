@@ -64,10 +64,11 @@ def build_legal_name_alias_graph_from_submissions(
 ) -> LegalNameAliasGraph:
     """Build a point-in-time legal-name graph from SEC submissions metadata.
 
-    `formerNames` is current SEC metadata, so future transitions are deliberately
-    hidden from a historical cutoff. If a former-name interval still contains the
-    cutoff, that former name is treated as the canonical name as of the cutoff and
-    today's SEC name is not injected as an alias.
+    SEC submissions metadata is read today, so rename events after the historical
+    cutoff are never exposed to the historical graph. An active former-name
+    interval is treated as the legal name at the cutoff. If metadata shows only
+    future name-history relative to the cutoff, the canonical name is left unknown
+    rather than backfilling today's name.
     """
 
     cik10 = normalize_cik(cik)
@@ -100,8 +101,18 @@ def build_legal_name_alias_graph_from_submissions(
         if (item[1] is None or item[1] <= analysis_date)
         and (item[2] is None or analysis_date < item[2])
     ]
+    future_history_exists = any(
+        (start is not None and start > analysis_date)
+        or (end is not None and end > analysis_date)
+        for _name, start, end in parsed
+    )
     if active_former:
         canonical_name = max(active_former, key=lambda item: item[1] or date.min)[0]
+    elif future_history_exists:
+        canonical_name = None
+        warnings.append(
+            "current SEC name may post-date the analysis cutoff and was withheld because future name-history exists"
+        )
     else:
         canonical_name = current_name
 
@@ -110,7 +121,6 @@ def build_legal_name_alias_graph_from_submissions(
     for name, valid_from, valid_to in parsed:
         if valid_from and valid_from > analysis_date:
             continue
-        # Never expose a future name-change date to a historical replay.
         visible_to = valid_to if valid_to is not None and valid_to <= analysis_date else None
         key = (normalize_party_name(name), valid_from, visible_to)
         if key in seen_records:
@@ -145,7 +155,6 @@ def build_legal_name_alias_graph_from_submissions(
                 )
             )
 
-    # Completed rename transitions only. A transition after the cutoff is hidden.
     transitions: list[LegalNameTransition] = []
     for index, (name, _start, end) in enumerate(parsed):
         if end is None or end > analysis_date:
