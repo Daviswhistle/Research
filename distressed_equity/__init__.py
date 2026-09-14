@@ -65,6 +65,12 @@ from .engine import (
     time_to_liquidity_exhaustion,
     value_scenario,
 )
+from .foreign_contract_graph import (
+    ForeignContractExpansion,
+    ForeignContractGraph,
+    expand_foreign_contract_identities,
+    foreign_contract_expansion_to_dict,
+)
 from .io import case_from_dict, load_case, load_screening_universe, screening_candidate_from_dict
 from .legal_name_alias import (
     LegalNameAliasGraph,
@@ -159,6 +165,7 @@ __all__ = [
     "DistressScanConfig",
     "enhance_expanded_packet_with_contract_identity",
     "ExpandedInstrumentPacket",
+    "expand_foreign_contract_identities",
     "expand_instrument_packet_with_references",
     "expand_packet_with_cross_cik",
     "extract_complete_submission_name_evidence",
@@ -169,6 +176,9 @@ __all__ = [
     "extract_source_references",
     "fetch_complete_submission_name_evidence",
     "FilingDocument",
+    "ForeignContractExpansion",
+    "ForeignContractGraph",
+    "foreign_contract_expansion_to_dict",
     "ingest_agent_results",
     "ingest_research_bundle",
     "IngestionReport",
