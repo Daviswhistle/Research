@@ -16,6 +16,11 @@ from .contract_graph import enhance_expanded_packet_with_contract_identity
 from .cross_cik import cross_cik_graph_to_dict, expand_packet_with_cross_cik
 from .evidence import EvidenceRecord, validate_point_in_time
 from .io import screening_candidate_from_dict
+from .legal_name_alias import (
+    alias_groups_from_graphs,
+    build_legal_name_alias_graph,
+    legal_name_alias_graph_to_dict,
+)
 from .market import HistoricalMarketProvider, market_snapshot
 from .prefill import build_screening_draft, build_sec_prefill_tasks
 from .screening import screen_candidate
@@ -132,6 +137,15 @@ def build_research_bundle(
     screening_draft = build_screening_draft(snapshot)
     warnings = list(snapshot.warnings)
 
+    legal_name_graph = build_legal_name_alias_graph(
+        sec_client,
+        cik=snapshot.cik,
+        analysis_date=analysis_date,
+    )
+    legal_name_payload = legal_name_alias_graph_to_dict(legal_name_graph)
+    legal_alias_groups = alias_groups_from_graphs((legal_name_graph,))
+    warnings.extend(legal_name_graph.warnings)
+
     capital_stack = build_capital_stack_packet(
         sec_client,
         ticker=snapshot.ticker,
@@ -179,6 +193,7 @@ def build_research_bundle(
                 contract_days_before_execution=contract_days_before_execution,
                 contract_days_after_execution=contract_days_after_execution,
                 max_candidates_per_exhibit=max_instrument_candidates_per_exhibit,
+                alias_groups=legal_alias_groups,
             )
         source_graph_payload = source_document_graph_to_dict(expanded.graph)
         warnings.extend(expanded.graph.warnings)
@@ -232,6 +247,7 @@ def build_research_bundle(
         "screening_draft": screening_draft,
         "capital_stack_packet": capital_stack_packet_to_dict(capital_stack),
         "capital_stack_diff": capital_stack_diff_to_dict(diff),
+        "legal_name_alias_graph": legal_name_payload,
         "debt_instrument_source_packet": sec_instrument_packet_to_dict(instrument_packet),
         "source_document_graph": source_graph_payload,
         "cross_cik_graph": cross_cik_graph_payload,
@@ -293,6 +309,9 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
     draft = packet["screening_draft"]["screening_candidate_draft"]
     diff = packet.get("capital_stack_diff") or {}
     source_packet = packet.get("debt_instrument_source_packet") or {}
+    name_graph = packet.get("legal_name_alias_graph") or {}
+    name_records = name_graph.get("records", []) if isinstance(name_graph, dict) else []
+    name_transitions = name_graph.get("transitions", []) if isinstance(name_graph, dict) else []
     graph = packet.get("source_document_graph") or {}
     graph_edges = graph.get("edges", []) if isinstance(graph, dict) else []
     resolved_edges = sum(1 for edge in graph_edges if str(edge.get("status") or "").startswith("resolved"))
@@ -310,6 +329,8 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
         "## Deterministic evidence state",
         "",
         f"- SEC filing/XBRL evidence rows: {len(packet.get('evidence', []))}",
+        f"- Legal-name records: {len(name_records)} / completed rename transitions: {len(name_transitions)}",
+        f"- Canonical legal name at cutoff: {name_graph.get('canonical_name_as_of')}",
         f"- Capital-stack snippets: {len((packet.get('capital_stack_packet') or {}).get('snippets', []))}",
         f"- Filing-to-filing change candidates: {len(diff.get('changes', []))}",
         f"- Debt-relevant SEC exhibit documents: {len(source_packet.get('documents', []))}",
@@ -321,14 +342,15 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
         "",
         "## Research loop",
         "",
-        "1. Review filing-to-filing capital-stack changes against source filings.",
-        "2. Review the source-document graph; inspect unresolved/ambiguous locator and contract-identity edges.",
-        "3. Review `cross_cik_graph.json`; foreign CIK traversal must be backed by explicit SEC CIK/Archives locators.",
-        "4. Review `debt_instrument_template.json`; verify/delete candidate fields against cited exhibit spans.",
-        "5. Feed verified snapshots to `distressed-equity-debt-ledger` for stable instrument identity and amendment tracking.",
-        "6. Have screening agents return the supplied structured result templates.",
-        "7. Use `distressed-equity-covenant` for source-backed maintenance-covenant EBITDA/headroom arithmetic.",
-        "8. Re-run this command with `--result` files or call `distressed-equity-ingest`.",
+        "1. Review `legal_name_alias_graph.json`; only cutoff-safe SEC rename evidence can bridge legal names.",
+        "2. Review filing-to-filing capital-stack changes against source filings.",
+        "3. Review the source-document graph; inspect unresolved/ambiguous locator and contract-identity edges.",
+        "4. Review `cross_cik_graph.json`; foreign CIK traversal must be backed by explicit SEC CIK/Archives locators.",
+        "5. Review `debt_instrument_template.json`; verify/delete candidate fields against cited exhibit spans.",
+        "6. Feed verified snapshots to `distressed-equity-debt-ledger` for stable instrument identity and amendment tracking.",
+        "7. Have screening agents return the supplied structured result templates.",
+        "8. Use `distressed-equity-covenant` for source-backed maintenance-covenant EBITDA/headroom arithmetic.",
+        "9. Re-run this command with `--result` files or call `distressed-equity-ingest`.",
         "",
     ]
     if merged is not None:
