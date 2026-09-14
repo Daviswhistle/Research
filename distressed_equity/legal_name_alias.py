@@ -206,6 +206,40 @@ def build_legal_name_alias_graph(
     )
 
 
+def build_legal_name_alias_graphs(
+    client: SecClient,
+    *,
+    ciks: Iterable[str | int],
+    analysis_date: date,
+    existing: Iterable[LegalNameAliasGraph] = (),
+) -> tuple[tuple[LegalNameAliasGraph, ...], tuple[str, ...]]:
+    """Collect alias graphs only for already-identified CIKs.
+
+    This helper never resolves an entity name to a CIK. Callers must supply CIKs
+    obtained from deterministic SEC identity evidence such as the root filing CIK
+    or explicit cross-CIK SEC locators. Lookup failures become warnings so an
+    auxiliary alias lookup cannot invalidate otherwise source-backed navigation.
+    """
+
+    known = {graph.cik: graph for graph in existing}
+    warnings: list[str] = []
+    for value in sorted({normalize_cik(cik) for cik in ciks}):
+        if value in known:
+            continue
+        try:
+            graph = build_legal_name_alias_graph(
+                client,
+                cik=value,
+                analysis_date=analysis_date,
+            )
+        except Exception as exc:
+            warnings.append(f"failed legal-name alias lookup for CIK {value}: {exc}")
+            continue
+        known[value] = graph
+        warnings.extend(f"CIK {value}: {item}" for item in graph.warnings)
+    return tuple(known[key] for key in sorted(known)), tuple(dict.fromkeys(warnings))
+
+
 def legal_name_alias_graph_to_dict(graph: LegalNameAliasGraph) -> dict[str, Any]:
     def convert(value: Any) -> Any:
         if isinstance(value, (date, datetime)):
