@@ -11,6 +11,11 @@ from .agent_results import (
 )
 from .base_rates import BaseRateCase, BaseRateLibrary, BaseRateSummary
 from .capital_stack_diff import CapitalStackDiffReport, diff_capital_stack_packet
+from .covenant_sensitivity import (
+    CovenantSensitivityCase,
+    CovenantSensitivityReport,
+    calculate_covenant_addback_sensitivity,
+)
 from .covenants import (
     CovenantDefinition,
     CovenantEbitdaBridge,
@@ -18,6 +23,13 @@ from .covenants import (
     CovenantInputs,
     calculate_covenant_headroom,
     covenant_model_from_dict,
+)
+from .debt_instruments import (
+    DebtInstrumentLedger,
+    DebtInstrumentSnapshot,
+    DebtInstrumentVersion,
+    build_debt_instrument_ledger,
+    debt_snapshots_from_dict,
 )
 from .engine import (
     analyze_case,
@@ -39,7 +51,9 @@ __all__ = [
     "BaseRateCase",
     "BaseRateLibrary",
     "BaseRateSummary",
+    "build_debt_instrument_ledger",
     "build_research_bundle",
+    "calculate_covenant_addback_sensitivity",
     "calculate_covenant_headroom",
     "CapitalStackDiffReport",
     "case_from_dict",
@@ -47,7 +61,13 @@ __all__ = [
     "CovenantEbitdaBridge",
     "CovenantHeadroomResult",
     "CovenantInputs",
+    "CovenantSensitivityCase",
+    "CovenantSensitivityReport",
     "covenant_model_from_dict",
+    "DebtInstrumentLedger",
+    "DebtInstrumentSnapshot",
+    "DebtInstrumentVersion",
+    "debt_snapshots_from_dict",
     "diff_capital_stack_packet",
     "DistressScanConfig",
     "ingest_agent_results",
