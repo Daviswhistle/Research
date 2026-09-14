@@ -9,6 +9,10 @@ from typing import Any
 
 from .contract_graph import enhance_expanded_packet_with_contract_identity
 from .cross_cik import cross_cik_graph_to_dict, expand_packet_with_cross_cik
+from .foreign_contract_graph import (
+    expand_foreign_contract_identities,
+    foreign_contract_expansion_to_dict,
+)
 from .legal_name_alias import (
     alias_groups_from_graphs,
     build_legal_name_alias_graph,
@@ -54,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-contract-identity-fallback",
         action="store_true",
-        help="Do not reverse-search locator-less contract title + execution-date references",
+        help="Do not reverse-search locator-less contract title + execution-date references, including inside explicit foreign CIKs",
     )
     parser.add_argument(
         "--no-cross-cik",
@@ -64,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", "-o", help="Expanded source packet JSON path; stdout when omitted")
     parser.add_argument("--legal-name-output", help="Optional point-in-time SEC legal-name alias graph JSON path")
     parser.add_argument("--graph-output", help="Optional same-CIK source-document graph JSON path")
-    parser.add_argument("--cross-cik-output", help="Optional cross-CIK legal-entity/source graph JSON path")
+    parser.add_argument("--cross-cik-output", help="Optional cross-CIK legal-entity/source/foreign-contract graph JSON path")
     parser.add_argument("--task-output", help="Optional verification task JSON path")
     parser.add_argument("--template-output", help="Optional ledger-ready verification template JSON path")
     return parser
@@ -174,6 +178,24 @@ def main(argv: list[str] | None = None) -> int:
             ]
             if legal_warnings:
                 cross_cik_payload.setdefault("warnings", []).extend(legal_warnings)
+
+            if not args.no_contract_identity_fallback:
+                foreign_expansion = expand_foreign_contract_identities(
+                    client,
+                    cross_expanded=cross_expanded,
+                    legal_name_graphs=legal_graphs,
+                    max_depth=args.reference_depth,
+                    max_nodes=args.cross_cik_max_nodes,
+                    max_contract_search_filings=args.contract_search_max_filings,
+                    contract_days_before_execution=args.contract_days_before_execution,
+                    contract_days_after_execution=args.contract_days_after_execution,
+                    max_candidates_per_exhibit=args.max_candidates_per_exhibit,
+                )
+                cross_expanded = foreign_expansion.cross_expanded
+                packet = cross_expanded.packet
+                foreign_payload = foreign_contract_expansion_to_dict(foreign_expansion)
+                cross_cik_payload["foreign_contract_graphs"] = foreign_payload["graphs"]
+                cross_cik_payload["foreign_contract_warnings"] = foreign_payload["warnings"]
         else:
             packet = expanded.packet
 
