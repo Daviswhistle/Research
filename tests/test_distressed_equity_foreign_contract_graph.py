@@ -88,7 +88,7 @@ def foreign_alias_graph(cik="2222222222"):
     )
 
 
-def cross_expanded_fixture():
+def cross_expanded_fixture(*, source_depth=0, target_depth=1):
     root_cik = "1111111111"
     foreign_cik = "2222222222"
     entry_filing = filing(foreign_cik, "2222222222-22-000010", date(2022, 5, 15), "8-K", "entry8k.htm")
@@ -124,6 +124,8 @@ def cross_expanded_fixture():
         reason="explicit target CIK and exact exhibit",
         target_accession=entry_filing.accession_number,
         target_document_url=entry.url,
+        source_depth=source_depth,
+        target_depth=target_depth,
     )
     graph = CrossCikGraph(
         root_cik=root_cik,
@@ -181,6 +183,7 @@ def test_foreign_locatorless_contract_uses_foreign_cik_alias_graph():
     graph = result.graphs[0]
     assert graph.target_cik == "2222222222"
     assert graph.cross_cik_hops == 1
+    assert graph.entry_global_depth == 1
     assert graph.local_depth_budget == 2
     assert any(edge.status == "resolved_by_contract_identity" for edge in graph.graph.edges)
     assert any(document.url == old_exhibit for document in result.cross_expanded.packet.documents)
@@ -188,6 +191,24 @@ def test_foreign_locatorless_contract_uses_foreign_cik_alias_graph():
         candidate.snapshot_template.get("commitment") == 900_000_000
         for candidate in result.cross_expanded.packet.candidates
     )
+
+
+def test_initial_foreign_fallback_uses_exact_global_depth_not_cik_hop_proxy():
+    cross_expanded, entry_filing, entry = cross_expanded_fixture(source_depth=2, target_depth=3)
+    client, old_exhibit = client_fixture(entry_filing, entry)
+    result = expand_foreign_contract_identities(
+        client,
+        cross_expanded=cross_expanded,
+        legal_name_graphs=(foreign_alias_graph(),),
+        max_depth=4,
+    )
+    assert len(result.graphs) == 1
+    graph = result.graphs[0]
+    assert graph.cross_cik_hops == 1
+    assert graph.entry_global_depth == 3
+    assert graph.local_depth_budget == 1
+    assert any(document.url == old_exhibit for document in result.cross_expanded.packet.documents)
+    assert not any("legacy CIK-hop depth proxy" in warning for warning in result.warnings)
 
 
 def test_root_aliases_cannot_bridge_a_foreign_contract_party():
@@ -215,7 +236,7 @@ def test_cross_cik_hop_consumes_global_depth_budget():
         max_depth=1,
     )
     assert result.graphs == ()
-    assert any("exhaust max_depth=1" in warning for warning in result.warnings)
+    assert any("exhausts max_depth=1" in warning for warning in result.warnings)
 
 
 def test_locatorless_foreign_contract_can_expose_and_resolve_third_cik_once():
@@ -266,6 +287,8 @@ def test_locatorless_foreign_contract_can_expose_and_resolve_third_cik_once():
         if item.status == "resolved_cross_cik" and item.target_cik == "3333333333"
     ]
     assert len(third_resolutions) == 1
+    assert third_resolutions[0].source_depth == 2
+    assert third_resolutions[0].target_depth == 3
     assert any(document.url == third_exhibit for document in result.cross_expanded.packet.documents)
     third_graphs = [item for item in result.graphs if item.target_cik == "3333333333"]
     assert len(third_graphs) == 1
