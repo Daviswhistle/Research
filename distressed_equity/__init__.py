@@ -66,6 +66,15 @@ from .engine import (
     value_scenario,
 )
 from .io import case_from_dict, load_case, load_screening_universe, screening_candidate_from_dict
+from .legal_name_alias import (
+    LegalNameAliasGraph,
+    LegalNameRecord,
+    LegalNameTransition,
+    alias_groups_from_graphs,
+    build_legal_name_alias_graph,
+    build_legal_name_alias_graph_from_submissions,
+    legal_name_alias_graph_to_dict,
+)
 from .market import MarketSnapshot, PricePoint, SecurityIdentity
 from .orchestration import ResearchBundle, build_research_bundle, ingest_research_bundle
 from .replay import DistressScanConfig, MarketDistressSeed, run_historical_replay
@@ -95,10 +104,13 @@ __all__ = [
     "analyze_case",
     "agent_result_from_dict",
     "agent_result_template",
+    "alias_groups_from_graphs",
     "BaseRateCase",
     "BaseRateLibrary",
     "BaseRateSummary",
     "build_debt_instrument_ledger",
+    "build_legal_name_alias_graph",
+    "build_legal_name_alias_graph_from_submissions",
     "build_research_bundle",
     "build_sec_instrument_packet",
     "calculate_covenant_addback_sensitivity",
@@ -147,6 +159,10 @@ __all__ = [
     "LegalEntityNode",
     "LegalEntityRelation",
     "LegalEntityRole",
+    "LegalNameAliasGraph",
+    "LegalNameRecord",
+    "LegalNameTransition",
+    "legal_name_alias_graph_to_dict",
     "load_case",
     "load_screening_universe",
     "MarketDistressSeed",
