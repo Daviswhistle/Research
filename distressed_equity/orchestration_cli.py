@@ -31,10 +31,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-instrument-candidates-per-exhibit", type=int, default=20)
     parser.add_argument("--reference-depth", type=int, default=3)
     parser.add_argument("--reference-max-nodes", type=int, default=80)
+    parser.add_argument("--contract-search-max-filings", type=int, default=40)
+    parser.add_argument("--contract-days-before-execution", type=int, default=30)
+    parser.add_argument("--contract-days-after-execution", type=int, default=550)
     parser.add_argument(
         "--no-resolve-references",
         action="store_true",
         help="Do not follow incorporation-by-reference links to older SEC filings/exhibits",
+    )
+    parser.add_argument(
+        "--no-contract-identity-fallback",
+        action="store_true",
+        help="Do not reverse-search locator-less contract title + execution-date references",
     )
     parser.add_argument("--market-provider", choices=("none", "alpha-vantage"), default="none")
     parser.add_argument("--alpha-vantage-key", help="Defaults to ALPHA_VANTAGE_API_KEY")
@@ -144,8 +152,12 @@ def main(argv: list[str] | None = None) -> int:
             max_instrument_exhibits_per_filing=args.max_instrument_exhibits_per_filing,
             max_instrument_candidates_per_exhibit=args.max_instrument_candidates_per_exhibit,
             resolve_incorporated_references=not args.no_resolve_references,
+            resolve_contract_identity_references=not args.no_contract_identity_fallback,
             reference_depth=args.reference_depth,
             reference_max_nodes=args.reference_max_nodes,
+            contract_search_max_filings=args.contract_search_max_filings,
+            contract_days_before_execution=args.contract_days_before_execution,
+            contract_days_after_execution=args.contract_days_after_execution,
             market_provider=market_provider,
             history_years=args.history_years,
         )
