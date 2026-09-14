@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 from datetime import date
 import json
 from pathlib import Path
@@ -12,6 +13,8 @@ from .agent_results import (
     ingest_agent_results,
     ingestion_report_to_dict,
 )
+from .io import screening_candidate_from_dict
+from .screening import screen_candidate
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -85,6 +88,11 @@ def main(argv: list[str] | None = None) -> int:
         apply_low_confidence=args.apply_low_confidence,
     )
     payload = ingestion_report_to_dict(report)
+    if report.ready_for_screening:
+        candidate = screening_candidate_from_dict(report.screening_candidate_draft)
+        payload["screening_result"] = asdict(screen_candidate(candidate))
+    else:
+        payload["screening_result"] = None
     _write(payload, args.output)
     return 0 if not report.errors else 2
 
