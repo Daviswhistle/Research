@@ -32,6 +32,9 @@ class FakeSecClient:
     def _throttle(self):
         return None
 
+    def submissions(self, cik):
+        return {"name": "Test Co", "formerNames": []}
+
     def snapshot(self, **kwargs):
         cutoff = kwargs["analysis_date"]
         filing = SecFiling(
@@ -112,6 +115,7 @@ def test_bundle_connects_sec_debt_diff_market_and_task_templates():
     assert packet["market_snapshot"]["adjusted_drawdown_from_peak"] == 0.8
     assert packet["capital_stack_packet"]["snippets"]
     assert packet["capital_stack_diff"]["changes"] == []
+    assert packet["legal_name_alias_graph"]["canonical_name_as_of"] == "Test Co"
     names = [item["task"]["name"] for item in packet["agent_tasks"]]
     assert "capital_stack_extractor" in names
     assert "historical_market_reconstructor" in names
@@ -130,6 +134,7 @@ def test_summary_makes_resume_path_explicit():
     summary = render_research_summary(bundle)
     assert "distressed-equity-covenant" in summary
     assert "structured result templates" in summary
+    assert "Canonical legal name at cutoff" in summary
 
 
 def test_frozen_packet_refuses_a_different_cutoff():
