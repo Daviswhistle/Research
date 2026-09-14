@@ -115,9 +115,26 @@ def _parse_date_after(text: str, start: int, *, max_gap: int = 80) -> date | Non
 
 
 def _party_context(text: str, start: int, end: int) -> str:
-    # Agreement preambles often place borrower/guarantor definitions immediately
-    # before the title or several hundred characters after the execution date.
-    return text[max(0, start - 350) : min(len(text), end + 700)]
+    """Keep party extraction local to one agreement mention.
+
+    This intentionally prefers false negatives over leaking a borrower from the
+    next sentence/facility into the current contract fingerprint.
+    """
+
+    left_floor = max(0, start - 500)
+    left_slice = text[left_floor:start]
+    left_markers = [left_slice.rfind("\n"), left_slice.rfind(". ")]
+    left_marker = max(left_markers)
+    left = left_floor + left_marker + (2 if left_marker >= 0 and left_slice[left_marker:left_marker + 2] == ". " else 1) if left_marker >= 0 else left_floor
+
+    right_cap = min(len(text), max(end + 700, start + 900))
+    right = right_cap
+    for marker in ("\n", ". "):
+        position = text.find(marker, end, right_cap)
+        if position >= 0:
+            right = min(right, position + (1 if marker == ". " else 0))
+
+    return text[left:right]
 
 
 def extract_contract_identities(text: str) -> tuple[ContractIdentity, ...]:
