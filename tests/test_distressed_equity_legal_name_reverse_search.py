@@ -71,16 +71,20 @@ def alias_graph(cutoff):
     )
 
 
+def historical_exhibit():
+    return (
+        "<html><body>Facebook Inc., as Borrower, is party to the "
+        "CREDIT AGREEMENT dated as of May 3, 2020.</body></html>"
+    )
+
+
 def test_completed_sec_rename_can_bridge_contract_party_name():
     old = filing()
     base = filing_index_url(old).rsplit("/", 1)[0]
     exhibit = base + "/ex10-1.htm"
     mapping = {
         filing_index_url(old): index_html(),
-        exhibit: (
-            "<html><body>CREDIT AGREEMENT dated as of May 3, 2020. "
-            "Facebook Inc., as Borrower.</body></html>"
-        ),
+        exhibit: historical_exhibit(),
     }
     source_identity = extract_contract_identities(
         "Meta Platforms, Inc., as Borrower, is party to the Credit Agreement dated May 3, 2020."
@@ -103,10 +107,7 @@ def test_rename_after_cutoff_cannot_bridge_party_name():
     exhibit = base + "/ex10-1.htm"
     mapping = {
         filing_index_url(old): index_html(),
-        exhibit: (
-            "<html><body>CREDIT AGREEMENT dated as of May 3, 2020. "
-            "Facebook Inc., as Borrower.</body></html>"
-        ),
+        exhibit: historical_exhibit(),
     }
     source_identity = extract_contract_identities(
         "Meta Platforms, Inc., as Borrower, is party to the Credit Agreement dated May 3, 2020."
