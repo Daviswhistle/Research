@@ -5,6 +5,12 @@ from datetime import date, timedelta
 import re
 from typing import Iterable
 
+from .contract_parties import (
+    ContractParty,
+    contract_parties_compatible,
+    extract_contract_parties,
+    party_fingerprint,
+)
 from .sec import SecClient, SecFiling
 from .sec_debt import html_to_text
 from .sec_instruments import FilingDocument, _get_text, filing_index_url, parse_filing_documents
@@ -47,6 +53,7 @@ class ContractIdentity:
     title: str
     kind: str
     execution_date: date
+    parties: tuple[ContractParty, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -107,21 +114,35 @@ def _parse_date_after(text: str, start: int, *, max_gap: int = 80) -> date | Non
     return None
 
 
+def _party_context(text: str, start: int, end: int) -> str:
+    # Agreement preambles often place borrower/guarantor definitions immediately
+    # before the title or several hundred characters after the execution date.
+    return text[max(0, start - 350) : min(len(text), end + 700)]
+
+
 def extract_contract_identities(text: str) -> tuple[ContractIdentity, ...]:
     plain = html_to_text(text)
     identities: list[ContractIdentity] = []
-    seen: set[tuple[str, date, bool]] = set()
+    seen: set[tuple[str, date, bool, tuple[tuple[str, str], ...]]] = set()
     for match in _CONTRACT_TITLE_RE.finditer(plain):
         execution_date = _parse_date_after(plain, match.end())
         if execution_date is None:
             continue
         title = re.sub(r"\s+", " ", match.group("title")).strip()
         kind = _canonical_kind(title)
-        key = (kind, execution_date, _is_restated_title(title))
+        parties = extract_contract_parties(_party_context(plain, match.start(), match.end() + 120))
+        key = (kind, execution_date, _is_restated_title(title), party_fingerprint(parties))
         if key in seen:
             continue
         seen.add(key)
-        identities.append(ContractIdentity(title=title, kind=kind, execution_date=execution_date))
+        identities.append(
+            ContractIdentity(
+                title=title,
+                kind=kind,
+                execution_date=execution_date,
+                parties=parties,
+            )
+        )
     return tuple(identities)
 
 
@@ -132,6 +153,7 @@ def _identity_matches(target: ContractIdentity, text: str) -> bool:
             identity.execution_date == target.execution_date
             and identity.kind == target.kind
             and _is_restated_title(identity.title) == target_restated
+            and contract_parties_compatible(target.parties, identity.parties)
         ):
             return True
     return False
@@ -149,12 +171,16 @@ def reverse_search_contract_identity(
     index_cache: dict[str, tuple[FilingDocument, ...]] | None = None,
     text_cache: dict[str, str] | None = None,
 ) -> ContractSearchResult:
-    """Search historical SEC exhibits for a unique contract-title + execution-date match.
+    """Search historical SEC exhibits for a unique contract identity match.
 
-    The execution date is treated as contract identity evidence, not filing date.
-    A result can therefore be filed later (for example in a 10-Q), but never after
-    the referencing source document. Multiple matching exhibits are intentionally
-    returned as ambiguous candidates rather than ranked to a winner.
+    Core identity is canonical contract kind + exact execution date. If the source
+    mention explicitly names borrower/issuer/guarantor entities, those party
+    fingerprints become hard filters rather than fuzzy score boosts. A candidate
+    that cannot independently confirm the required party is not auto-resolved.
+
+    The execution date is contract identity evidence, not filing date. A result
+    can therefore be filed later (for example in a 10-Q), but never after the
+    referencing source document. Multiple matches remain ambiguous.
 
     Modification exhibits are excluded when resolving an original agreement, so
     an amendment that merely quotes the original agreement's title/date cannot be
