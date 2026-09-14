@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import json
 import os
 from pathlib import Path
 from typing import Any
 
 from .alpha_vantage import AlphaVantageProvider
-from .orchestration import build_research_bundle, ingest_research_bundle, render_research_summary
+from .orchestration import (
+    ResearchBundle,
+    build_research_bundle,
+    ingest_research_bundle,
+    render_research_summary,
+)
 from .sec import SecClient
 
 
@@ -26,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--market-provider", choices=("none", "alpha-vantage"), default="none")
     parser.add_argument("--alpha-vantage-key", help="Defaults to ALPHA_VANTAGE_API_KEY")
     parser.add_argument("--history-years", type=int, default=5)
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Rebuild the point-in-time packet even when research_packet.json already exists",
+    )
     parser.add_argument(
         "--result",
         action="append",
@@ -50,38 +61,56 @@ def _load_json(path: str | Path) -> dict[str, Any]:
     return payload
 
 
+def _bundle_from_frozen_packet(packet: dict[str, Any], cutoff: date) -> ResearchBundle:
+    snapshot = packet.get("snapshot") or {}
+    packet_date = str(snapshot.get("analysis_date") or "")[:10]
+    if packet_date and packet_date != cutoff.isoformat():
+        raise ValueError(
+            f"workspace packet cutoff {packet_date} does not match requested {cutoff.isoformat()}; use --refresh intentionally"
+        )
+    return ResearchBundle(
+        ticker=snapshot.get("ticker"),
+        company_name=str(snapshot.get("company_name") or snapshot.get("cik") or "Unknown company"),
+        analysis_date=cutoff,
+        packet=packet,
+        warnings=tuple(str(item) for item in snapshot.get("warnings", []) if str(item).strip()),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    from datetime import date
-
     cutoff = date.fromisoformat(args.analysis_date)
     workspace = Path(args.workspace)
     workspace.mkdir(parents=True, exist_ok=True)
+    packet_path = workspace / "research_packet.json"
 
-    sec_client = SecClient(user_agent=args.user_agent)
-    market_provider = None
-    if args.market_provider == "alpha-vantage":
-        market_provider = AlphaVantageProvider(
-            api_key=args.alpha_vantage_key or os.getenv("ALPHA_VANTAGE_API_KEY")
+    if packet_path.exists() and not args.refresh:
+        bundle = _bundle_from_frozen_packet(_load_json(packet_path), cutoff)
+    else:
+        sec_client = SecClient(user_agent=args.user_agent)
+        market_provider = None
+        if args.market_provider == "alpha-vantage":
+            market_provider = AlphaVantageProvider(
+                api_key=args.alpha_vantage_key or os.getenv("ALPHA_VANTAGE_API_KEY")
+            )
+
+        bundle = build_research_bundle(
+            sec_client,
+            analysis_date=cutoff,
+            ticker=args.ticker,
+            cik=args.cik,
+            filing_limit=args.filing_limit,
+            max_snippets_per_filing=args.max_snippets_per_filing,
+            market_provider=market_provider,
+            history_years=args.history_years,
         )
 
-    bundle = build_research_bundle(
-        sec_client,
-        analysis_date=cutoff,
-        ticker=args.ticker,
-        cik=args.cik,
-        filing_limit=args.filing_limit,
-        max_snippets_per_filing=args.max_snippets_per_filing,
-        market_provider=market_provider,
-        history_years=args.history_years,
-    )
-
-    _write_json(workspace / "research_packet.json", bundle.packet)
-    _write_json(workspace / "capital_stack.json", bundle.packet["capital_stack_packet"])
-    _write_json(workspace / "capital_stack_diff.json", bundle.packet["capital_stack_diff"])
-    _write_json(workspace / "tasks.json", {"tasks": bundle.packet["agent_tasks"]})
-    if bundle.packet.get("market_snapshot") is not None:
-        _write_json(workspace / "market_snapshot.json", bundle.packet["market_snapshot"])
+        _write_json(packet_path, bundle.packet)
+        _write_json(workspace / "capital_stack.json", bundle.packet["capital_stack_packet"])
+        _write_json(workspace / "capital_stack_diff.json", bundle.packet["capital_stack_diff"])
+        _write_json(workspace / "tasks.json", {"tasks": bundle.packet["agent_tasks"]})
+        if bundle.packet.get("market_snapshot") is not None:
+            _write_json(workspace / "market_snapshot.json", bundle.packet["market_snapshot"])
 
     merged = None
     if args.result:
