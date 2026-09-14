@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from typing import Any, Iterable
 
@@ -85,8 +85,6 @@ TASK_PATCH_PATHS: dict[str, frozenset[str]] = {
             "covenants",
         }
     ),
-    # Probability calibration deliberately cannot patch the deterministic
-    # screening candidate. Its interval belongs in a later review layer.
     "probability_calibrator": frozenset(),
     "model_verifier": frozenset(),
 }
@@ -214,7 +212,11 @@ def _validate_patch_value(path: str, value: Any) -> str | None:
         "capital_structure.current_price",
         "capital_structure.current_shares",
         "peak_market_cap",
+    }
+    signed_numeric = {
+        "capital_structure.net_debt",
         "current_enterprise_value",
+        "monthly_cash_burn",
     }
     nonnegative = {
         "capital_structure.other_senior_claims",
@@ -223,7 +225,6 @@ def _validate_patch_value(path: str, value: Any) -> str | None:
         "available_credit",
         "asset_monetization",
         "restricted_cash",
-        "monthly_cash_burn",
     }
     booleans = {
         "has_real_customers",
@@ -234,9 +235,9 @@ def _validate_patch_value(path: str, value: Any) -> str | None:
     if path in positive:
         if not _is_number(value) or float(value) <= 0:
             return "must be a positive number"
-    elif path == "capital_structure.net_debt":
+    elif path in signed_numeric:
         if not _is_number(value):
-            return "must be numeric; negative is allowed for net cash"
+            return "must be numeric"
     elif path in nonnegative:
         if not _is_number(value) or float(value) < 0:
             return "must be a non-negative number"
@@ -265,6 +266,8 @@ def _validate_patch_value(path: str, value: Any) -> str | None:
             for key in ("enterprise_value", "exit_net_debt"):
                 if not _is_number(value.get(key)):
                     return f"scenario {key} must be numeric"
+            if float(value["enterprise_value"]) < 0:
+                return "scenario enterprise_value must be non-negative"
             assumptions = value.get("critical_assumptions", [])
             if not isinstance(assumptions, list) or not all(isinstance(item, str) for item in assumptions):
                 return "scenario critical_assumptions must be a list of strings"
@@ -353,6 +356,16 @@ def missing_for_screening(candidate: dict[str, Any]) -> tuple[str, ...]:
     return tuple(missing)
 
 
+def _existing_is_unset(path: str, existing: Any, proposed: Any) -> bool:
+    if existing is None:
+        return True
+    if path in {"debt_obligations", "covenants"} and existing == []:
+        return True
+    if path == "critical_assumptions_complete" and existing is False and proposed is True:
+        return True
+    return False
+
+
 def ingest_agent_results(
     research_packet: dict[str, Any],
     results: Iterable[AgentResult],
@@ -410,13 +423,21 @@ def ingest_agent_results(
         unresolved.extend(f"{result.task_name}: {item}" for item in result.unresolved)
         if not validation.valid:
             continue
-        combined_evidence.extend(result.evidence)
+        for record in result.evidence:
+            namespaced_id = (
+                f"{result.task_name}:{record.evidence_id}" if record.evidence_id else None
+            )
+            combined_evidence.append(replace(record, evidence_id=namespaced_id))
         for patch in result.patches:
             if patch.confidence == "low" and not apply_low_confidence:
                 low_skipped.append(patch.path)
                 continue
             existing = _get_path(candidate, patch.path)
-            if existing is not None and existing != patch.value and not allow_overwrite:
+            if (
+                not _existing_is_unset(patch.path, existing, patch.value)
+                and existing != patch.value
+                and not allow_overwrite
+            ):
                 conflicts.append(
                     f"{patch.path}: existing value {existing!r} differs from proposed {patch.value!r}"
                 )
@@ -426,6 +447,9 @@ def ingest_agent_results(
 
     pit_violations = validate_point_in_time(tuple(combined_evidence), analysis_date)
     errors.extend(pit_violations)
+    evidence_ids = [record.evidence_id for record in combined_evidence if record.evidence_id]
+    if len(evidence_ids) != len(set(evidence_ids)):
+        errors.append("combined evidence ledger contains duplicate evidence_id values")
     missing = missing_for_screening(candidate)
     return IngestionReport(
         screening_candidate_draft=candidate,
