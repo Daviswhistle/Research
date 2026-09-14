@@ -56,6 +56,36 @@ class FakeSecClient:
         )
 
 
+class RenamedFakeSecClient(FakeSecClient):
+    def submissions(self, cik):
+        return {
+            "name": "Meta Platforms, Inc.",
+            "formerNames": [
+                {"name": "Facebook Inc", "from": "2005-05-06", "to": "2021-10-27"},
+            ],
+        }
+
+    def snapshot(self, **kwargs):
+        cutoff = kwargs["analysis_date"]
+        filing = SecFiling(
+            cik="0001326801",
+            accession_number="0001326801-20-000001",
+            filing_date=date(2020, 11, 1),
+            form="10-Q",
+            primary_document="test.htm",
+            report_date=date(2020, 9, 30),
+        )
+        return SecPointInTimeSnapshot(
+            ticker="META",
+            cik="0001326801",
+            company_name="Meta Platforms, Inc.",
+            analysis_date=cutoff,
+            filings=(filing,),
+            facts={},
+            warnings=(),
+        )
+
+
 class FakeMarketProvider:
     name = "fake-market"
     bulk_safe = True
@@ -122,6 +152,19 @@ def test_bundle_connects_sec_debt_diff_market_and_task_templates():
     assert all("result_template" in item for item in packet["agent_tasks"])
     assert packet["point_in_time_violations"] == []
     assert packet["source_document_graph"] is None
+
+
+def test_research_snapshot_uses_cutoff_safe_legal_name():
+    bundle = build_research_bundle(
+        RenamedFakeSecClient(),
+        ticker="META",
+        analysis_date=date(2020, 12, 31),
+        resolve_incorporated_references=False,
+    )
+    assert bundle.company_name == "Facebook Inc"
+    assert bundle.packet["snapshot"]["company_name"] == "Facebook Inc"
+    assert bundle.packet["legal_name_alias_graph"]["canonical_name_as_of"] == "Facebook Inc"
+    assert all("Meta Platforms" not in item["claim"] for item in bundle.packet["evidence"])
 
 
 def test_summary_makes_resume_path_explicit():
