@@ -93,10 +93,10 @@ def test_primary_obligor_is_a_hard_filter_for_locatorless_matching():
         "ABC Borrower LLC, as Borrower, is party to the Credit Agreement dated May 3, 2019."
     )[0]
     same = extract_contract_identities(
-        "CREDIT AGREEMENT dated as of May 3, 2019. ABC Borrower LLC, as Borrower."
+        "CREDIT AGREEMENT dated as of May 3, 2019 among ABC Borrower LLC, as Borrower."
     )[0]
     different = extract_contract_identities(
-        "CREDIT AGREEMENT dated as of May 3, 2019. XYZ Borrower LLC, as Borrower."
+        "CREDIT AGREEMENT dated as of May 3, 2019 among XYZ Borrower LLC, as Borrower."
     )[0]
     assert contract_parties_compatible(source.parties, same.parties) is True
     assert contract_parties_compatible(source.parties, different.parties) is False
@@ -123,11 +123,11 @@ def test_reverse_search_disambiguates_same_title_and_date_by_borrower():
         filing_index_url(old_a): index_html("old-a.htm", "ex10-1a.htm"),
         filing_index_url(old_b): index_html("old-b.htm", "ex10-1b.htm"),
         exhibit_a: (
-            "<html><body>CREDIT AGREEMENT dated as of May 3, 2019. "
+            "<html><body>CREDIT AGREEMENT dated as of May 3, 2019 among "
             "ABC Borrower LLC, as Borrower.</body></html>"
         ),
         exhibit_b: (
-            "<html><body>CREDIT AGREEMENT dated as of May 3, 2019. "
+            "<html><body>CREDIT AGREEMENT dated as of May 3, 2019 among "
             "XYZ Borrower LLC, as Borrower.</body></html>"
         ),
     }
@@ -149,10 +149,17 @@ def test_guarantor_can_disambiguate_when_no_borrower_is_named():
         "Parent Holdings Inc., as Guarantor, is party to the Credit Agreement dated May 3, 2019."
     )[0]
     same = extract_contract_identities(
-        "Credit Agreement dated May 3, 2019. Parent Holdings, Inc., as Guarantor."
+        "Credit Agreement dated May 3, 2019 among Parent Holdings, Inc., as Guarantor."
     )[0]
     other = extract_contract_identities(
-        "Credit Agreement dated May 3, 2019. Other Parent Inc., as Guarantor."
+        "Credit Agreement dated May 3, 2019 among Other Parent Inc., as Guarantor."
     )[0]
     assert contract_parties_compatible(source.parties, same.parties) is True
     assert contract_parties_compatible(source.parties, other.parties) is False
+
+
+def test_cross_sentence_party_after_contract_title_is_not_used_as_identity_evidence():
+    identity = extract_contract_identities(
+        "Credit Agreement dated May 3, 2019. Unrelated Subsidiary LLC, as Borrower, entered another facility."
+    )[0]
+    assert identity.parties == ()
