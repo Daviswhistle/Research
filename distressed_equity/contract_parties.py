@@ -138,30 +138,77 @@ def party_fingerprint(parties: Iterable[ContractParty]) -> tuple[tuple[str, str]
     return tuple(sorted({(item.role, item.normalized_name) for item in parties}))
 
 
+def _names_equivalent(
+    left: str,
+    right: str,
+    alias_groups: Iterable[Iterable[str]],
+) -> bool:
+    if left == right:
+        return True
+    for group in alias_groups:
+        normalized = set(group)
+        if left in normalized and right in normalized:
+            return True
+    return False
+
+
+def _role_sets_overlap(
+    left: set[tuple[str, str]],
+    right: set[tuple[str, str]],
+    alias_groups: Iterable[Iterable[str]],
+) -> bool:
+    for left_role, left_name in left:
+        for right_role, right_name in right:
+            if left_role == right_role and _names_equivalent(left_name, right_name, alias_groups):
+                return True
+    return False
+
+
+def _name_sets_overlap(
+    left: set[str],
+    right: set[str],
+    alias_groups: Iterable[Iterable[str]],
+) -> bool:
+    return any(_names_equivalent(a, b, alias_groups) for a in left for b in right)
+
+
 def contract_parties_compatible(
     target_parties: Iterable[ContractParty],
     candidate_parties: Iterable[ContractParty],
+    *,
+    alias_groups: Iterable[Iterable[str]] = (),
 ) -> bool:
-    """Hard-filter party compatibility for locator-less fallback matching."""
+    """Hard-filter party compatibility for locator-less fallback matching.
+
+    Alias groups are accepted only when supplied by a deterministic external
+    identity source such as the SEC CIK former-name graph. This function never
+    creates fuzzy aliases by itself.
+    """
 
     target = tuple(target_parties)
     candidate = tuple(candidate_parties)
     if not target:
         return True
 
+    alias_groups = tuple(tuple(group) for group in alias_groups)
     target_primary = {(p.role, p.normalized_name) for p in target if p.role in {"borrower", "issuer"}}
     candidate_primary = {(p.role, p.normalized_name) for p in candidate if p.role in {"borrower", "issuer"}}
     target_guarantors = {p.normalized_name for p in target if p.role == "guarantor"}
     candidate_guarantors = {p.normalized_name for p in candidate if p.role == "guarantor"}
 
     if target_primary:
-        if not candidate_primary or target_primary.isdisjoint(candidate_primary):
+        if not candidate_primary or not _role_sets_overlap(target_primary, candidate_primary, alias_groups):
             return False
-        if target_guarantors and candidate_guarantors and target_guarantors.isdisjoint(candidate_guarantors):
+        if target_guarantors and candidate_guarantors and not _name_sets_overlap(
+            target_guarantors, candidate_guarantors, alias_groups
+        ):
             return False
         return True
 
     if target_guarantors:
-        return bool(candidate_guarantors and not target_guarantors.isdisjoint(candidate_guarantors))
+        return bool(
+            candidate_guarantors
+            and _name_sets_overlap(target_guarantors, candidate_guarantors, alias_groups)
+        )
 
     return True
