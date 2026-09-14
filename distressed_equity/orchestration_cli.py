@@ -128,6 +128,9 @@ def _write_bundle_artifacts(workspace: Path, bundle: ResearchBundle) -> None:
     cross_graph = packet.get("cross_cik_graph")
     if cross_graph is not None:
         _write_json(workspace / "cross_cik_graph.json", cross_graph)
+    named_entity_graph = packet.get("named_entity_contract_graph")
+    if named_entity_graph is not None:
+        _write_json(workspace / "named_entity_contract_graph.json", named_entity_graph)
     verification = packet.get("debt_instrument_verification")
     if isinstance(verification, dict):
         _write_json(workspace / "debt_instrument_task.json", verification.get("task", {}))
