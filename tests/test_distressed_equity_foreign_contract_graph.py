@@ -40,6 +40,10 @@ class FakeClient:
     def _throttle(self):
         return None
 
+    def submissions(self, cik):
+        key = str(cik).zfill(10)
+        return {"name": f"CIK {key} Co", "formerNames": []}
+
     def filings_as_of(self, cik, analysis_date, forms=()):
         key = str(cik).zfill(10)
         allowed = set(forms)
@@ -212,3 +216,58 @@ def test_cross_cik_hop_consumes_global_depth_budget():
     )
     assert result.graphs == ()
     assert any("exhaust max_depth=1" in warning for warning in result.warnings)
+
+
+def test_locatorless_foreign_contract_can_expose_and_resolve_third_cik_once():
+    cross_expanded, entry_filing, entry = cross_expanded_fixture()
+    old = filing("2222222222", "2222222222-19-000003", date(2019, 5, 10), "8-K", "old8k.htm")
+    old_base = filing_index_url(old).rsplit("/", 1)[0]
+    old_exhibit = old_base + "/ex10-1.htm"
+
+    third = filing("3333333333", "3333333333-19-000004", date(2019, 4, 30), "8-K", "third8k.htm")
+    third_base = filing_index_url(third).rsplit("/", 1)[0]
+    third_exhibit = third_base + "/ex10-b.htm"
+    third_href = (
+        "https://www.sec.gov/Archives/edgar/data/3333333333/"
+        "333333333319000004/ex10-b.htm"
+    )
+
+    mapping = {
+        entry.url: (
+            "<html><body>Borrower New LLC, as Borrower, is party to the "
+            "Credit Agreement dated May 3, 2019.</body></html>"
+        ),
+        filing_index_url(old): index_html("old8k.htm", "ex10-1.htm"),
+        old_exhibit: (
+            "<html><body>Credit Agreement dated May 3, 2019 among Borrower Old LLC, as Borrower. "
+            f'<a href="{third_href}">Third-party guarantee</a>'
+            f'<a href="{third_href}">Duplicate third-party guarantee</a>'
+            "</body></html>"
+        ),
+        filing_index_url(third): index_html("third8k.htm", "ex10-b.htm"),
+        third_exhibit: "<html><body>$250 million of senior notes mature in 2026.</body></html>",
+    }
+    client = FakeClient(
+        {
+            "2222222222": (entry_filing, old),
+            "3333333333": (third,),
+        },
+        mapping,
+    )
+    result = expand_foreign_contract_identities(
+        client,
+        cross_expanded=cross_expanded,
+        legal_name_graphs=(foreign_alias_graph(),),
+        max_depth=4,
+    )
+
+    third_resolutions = [
+        item for item in result.cross_expanded.cross_cik_graph.resolutions
+        if item.status == "resolved_cross_cik" and item.target_cik == "3333333333"
+    ]
+    assert len(third_resolutions) == 1
+    assert any(document.url == third_exhibit for document in result.cross_expanded.packet.documents)
+    third_graphs = [item for item in result.graphs if item.target_cik == "3333333333"]
+    assert len(third_graphs) == 1
+    assert third_graphs[0].entry_global_depth == 3
+    assert third_graphs[0].local_depth_budget == 1
