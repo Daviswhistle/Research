@@ -198,11 +198,65 @@ def build_legal_name_alias_graph(
     *,
     cik: str | int,
     analysis_date: date,
-) -> LegalNameAliasGraph:
-    return build_legal_name_alias_graph_from_submissions(
-        client.submissions(cik),
-        cik=cik,
+):
+    """Build submissions metadata and reconcile it with historical SEC headers.
+
+    Complete-submission headers are primary historical observations. Header lookup
+    is best-effort: an unavailable header never invalidates the submissions graph.
+    """
+
+    cik10 = normalize_cik(cik)
+    base = build_legal_name_alias_graph_from_submissions(
+        client.submissions(cik10),
+        cik=cik10,
         analysis_date=analysis_date,
+    )
+    try:
+        filings = client.filings_as_of(
+            cik10,
+            analysis_date,
+            forms=("10-K", "10-K/A", "10-Q", "10-Q/A", "8-K", "8-K/A", "S-1", "S-1/A", "S-3", "S-3/A", "S-4", "S-4/A"),
+        )
+    except Exception:
+        return base
+
+    from .legal_name_header import fetch_complete_submission_name_evidence
+    from .legal_name_reconcile import reconcile_legal_name_sources
+
+    evidence = []
+    lookup_warnings: list[str] = []
+    selected = sorted(
+        (filing for filing in filings if filing.filing_date <= analysis_date),
+        key=lambda filing: (filing.filing_date, filing.accession_number),
+        reverse=True,
+    )[:3]
+    for filing in selected:
+        try:
+            evidence.append(
+                fetch_complete_submission_name_evidence(
+                    client,
+                    filing=filing,
+                    target_cik=cik10,
+                )
+            )
+        except Exception as exc:
+            lookup_warnings.append(
+                f"failed complete-submission legal-name header lookup for {filing.accession_number}: {exc}"
+            )
+
+    reconciled = reconcile_legal_name_sources(base, evidence)
+    if not lookup_warnings:
+        return reconciled
+    return type(reconciled)(
+        cik=reconciled.cik,
+        analysis_date=reconciled.analysis_date,
+        canonical_name_as_of=reconciled.canonical_name_as_of,
+        canonical_status=reconciled.canonical_status,
+        records=reconciled.records,
+        transitions=reconciled.transitions,
+        comparisons=reconciled.comparisons,
+        header_evidence=reconciled.header_evidence,
+        warnings=tuple(dict.fromkeys(list(reconciled.warnings) + lookup_warnings)),
     )
 
 
