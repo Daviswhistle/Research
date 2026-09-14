@@ -24,6 +24,9 @@ output/cvna_2022-12-31/
 ├── research_packet.json
 ├── capital_stack.json
 ├── capital_stack_diff.json
+├── debt_instrument_sources.json
+├── debt_instrument_task.json
+├── debt_instrument_template.json
 ├── market_snapshot.json       # market provider 사용 시
 ├── tasks.json
 └── summary.md
@@ -45,9 +48,29 @@ output/cvna_2022-12-31/
 
 를 사용한다. 요청한 `analysis_date`와 frozen packet의 cutoff가 다르면 재사용을 거부한다.
 
+## SEC debt instrument source 단계
+
+Workspace 생성 시 recent point-in-time filings의 EDGAR filing index를 읽고 EX-4/EX-10 계열 debt-relevant exhibit를 찾는다.
+
+```text
+filing index
+  ↓
+indenture / credit agreement / amendment candidate
+  ↓
+exact exhibit text span
+  ↓
+field-level proposal
+  ↓
+debt_instrument_template.json
+```
+
+Template에는 명시적으로 연결된 coupon, maturity, principal, CUSIP/ISIN, commitment, SOFR spread 같은 high-confidence field만 prefill한다. 이것도 최종 debt schedule은 아니다.
+
+`debt_instrument_task.json`의 검증 단계에서 중복 candidate를 합치거나 제거하고, retained field마다 `source_refs`를 유지한다.
+
 ## Agent 단계
 
-`tasks.json`의 각 task에는:
+`tasks.json`의 각 screening task에는:
 
 - objective
 - guardrails
@@ -57,6 +80,8 @@ output/cvna_2022-12-31/
 가 들어간다.
 
 에이전트는 result template을 채워 JSON으로 반환해야 한다.
+
+Debt instrument verification은 screening candidate patch가 아니라 stable debt ledger 입력을 만드는 별도 task라서 `debt_instrument_task.json`으로 분리한다.
 
 Capital-stack agent가 maintenance covenant를 찾았다면 ratio를 자유문장으로 계산하지 말고 계약 정의와 입력값을 source-backed covenant model로 정리한 뒤:
 
@@ -70,14 +95,14 @@ distressed-equity-covenant covenant_input.json -o covenant_result.json
 
 ## Debt instrument identity 단계
 
-Agent가 filing별 debt instrument snapshot을 구조화했다면 별도의 stable-ID ledger를 만든다.
+검증한 filing별 debt instrument snapshot을 stable-ID ledger로 넘긴다.
 
 ```bash
 distressed-equity-research \
   --ticker CVNA \
   --analysis-date 2022-12-31 \
   --workspace output/cvna_2022-12-31 \
-  --debt-instruments debt_instruments.json
+  --debt-instruments output/cvna_2022-12-31/debt_instrument_template.json
 ```
 
 생성물:
@@ -85,6 +110,16 @@ distressed-equity-research \
 ```text
 debt_instrument_ledger.json
 ```
+
+Workspace 경로에서는 각 snapshot을 frozen `debt_instrument_sources.json`과 대조한다.
+
+- `source_refs` 필수
+- 실제 span ID인지 확인
+- `source_accession` 일치 확인
+- cited exhibit 공개일보다 snapshot 날짜가 빠르지 않은지 확인
+- workspace cutoff 이후 snapshot인지 확인
+
+따라서 출처 없는 숫자를 별도 JSON에 넣어 stable ledger로 우회하는 경로를 막는다.
 
 CUSIP/ISIN이 있으면 이를 우선 사용하고, 없으면 이름/type/maturity/coupon/seniority/security를 이용한 보수적 heuristic matching을 사용한다. Match가 애매하면 자동으로 합치지 않는다.
 
@@ -97,7 +132,7 @@ distressed-equity-research \
   --ticker CVNA \
   --analysis-date 2022-12-31 \
   --workspace output/cvna_2022-12-31 \
-  --debt-instruments debt_instruments.json \
+  --debt-instruments output/cvna_2022-12-31/debt_instrument_template.json \
   --result output/capital_stack_result.json \
   --result output/market_result.json \
   --result output/normalization_result.json
@@ -113,7 +148,7 @@ merged.json
 
 ## 왜 두 번 실행하는가
 
-외부 agent harness가 비동기/병렬로 움직일 수 있고, 각 조사 결과를 사람이 검토하고 다시 넣을 수도 있기 때문이다.
+외부 agent harness가 병렬로 움직일 수 있고, 각 조사 결과를 사람이 검토하고 다시 넣을 수도 있기 때문이다.
 
 중요한 것은 실행 도구가 아니라 상태 경계다.
 
@@ -165,5 +200,6 @@ workspace의 `capital_stack_diff.json`은 최근 point-in-time filings 사이에
 - point success probability
 - peak market cap을 price proxy로 대체하는 계산
 - ambiguous debt instrument identity의 강제 matching
+- incorporation-by-reference로 멀리 떨어진 과거 exhibit의 무제한 재귀 추적
 
 이 경계를 유지해야 historical replay가 결과를 알고 난 뒤의 hindsight로 오염되지 않는다.
