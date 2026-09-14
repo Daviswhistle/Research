@@ -191,7 +191,7 @@ Low-confidence patch는 기본적으로 evidence만 남기고 값을 바꾸지 �
 
 ### Resumable one-company orchestration
 
-SEC, debt/covenant packet, filing diff, optional market snapshot, task template 생성을 한 workspace로 묶을 수 있습니다.
+SEC, debt/covenant packet, filing diff, source-document graph, explicit cross-CIK source/legal-entity graph, optional market snapshot, task template 생성을 한 workspace로 묶을 수 있습니다.
 
 ```bash
 export SEC_USER_AGENT="Research your-email@example.com"
@@ -203,6 +203,8 @@ distressed-equity-research \
   --market-provider alpha-vantage \
   --workspace output/cvna_2022-12-31
 ```
+
+Cross-CIK 탐색은 SEC Archives URL, 명시 CIK, exact accession처럼 **source가 target CIK를 직접 증명하는 경우만** 허용합니다. 회사명만으로 다른 CIK를 추정하지 않습니다. `cross_cik_graph.json`은 foreign source resolution과 explicit borrower/issuer/guarantor/subsidiary evidence를 별도 provenance graph로 보존합니다.
 
 Agent가 filing별 debt instrument snapshot을 구조화했다면 같은 workspace에서 stable ledger를 함께 만들 수 있습니다.
 
@@ -279,6 +281,9 @@ distressed-equity-base-rates cases.jsonl \
 - [`docs/SEC_EVIDENCE.md`](docs/SEC_EVIDENCE.md)
 - [`docs/SEC_CAPITAL_STACK.md`](docs/SEC_CAPITAL_STACK.md)
 - [`docs/DEBT_INSTRUMENT_LEDGER.md`](docs/DEBT_INSTRUMENT_LEDGER.md)
+- [`docs/CONTRACT_PARTY_IDENTITY.md`](docs/CONTRACT_PARTY_IDENTITY.md)
+- [`docs/SOURCE_DOCUMENT_GRAPH.md`](docs/SOURCE_DOCUMENT_GRAPH.md)
+- [`docs/CROSS_CIK_LEGAL_ENTITY_GRAPH.md`](docs/CROSS_CIK_LEGAL_ENTITY_GRAPH.md)
 - [`docs/COVENANT_HEADROOM.md`](docs/COVENANT_HEADROOM.md)
 - [`docs/COVENANT_SENSITIVITY.md`](docs/COVENANT_SENSITIVITY.md)
 - [`docs/AGENT_INGESTION.md`](docs/AGENT_INGESTION.md)
