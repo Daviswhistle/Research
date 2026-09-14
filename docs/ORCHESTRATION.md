@@ -31,6 +31,20 @@ output/cvna_2022-12-31/
 
 `research_packet.json`은 agent-result ingestion의 canonical input이다.
 
+## Frozen packet 원칙
+
+한 번 생성된 `research_packet.json`이 존재하면 같은 workspace의 후속 실행은 기본적으로 그 packet을 재사용한다. Historical replay 중간에 SEC/market source를 다시 fetch해 입력 상태가 바뀌는 것을 막기 위한 것이다.
+
+의도적으로 다시 수집하려면:
+
+```bash
+distressed-equity-research ... --refresh
+```
+
+를 사용한다.
+
+기존 packet의 `analysis_date`와 새 명령의 cutoff가 다르면 자동 재사용하지 않고 오류를 낸다.
+
 ## Agent 단계
 
 `tasks.json`의 각 task에는:
