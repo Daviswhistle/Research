@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .contract_graph import enhance_expanded_packet_with_contract_identity
 from .sec import SecClient
 from .sec_instruments import (
     build_instrument_verification_task,
@@ -34,10 +35,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-candidates-per-exhibit", type=int, default=20)
     parser.add_argument("--reference-depth", type=int, default=3)
     parser.add_argument("--reference-max-nodes", type=int, default=80)
+    parser.add_argument("--contract-search-max-filings", type=int, default=40)
+    parser.add_argument("--contract-days-before-execution", type=int, default=30)
+    parser.add_argument("--contract-days-after-execution", type=int, default=550)
     parser.add_argument(
         "--no-resolve-references",
         action="store_true",
         help="Do not follow incorporation-by-reference links to older SEC filings/exhibits",
+    )
+    parser.add_argument(
+        "--no-contract-identity-fallback",
+        action="store_true",
+        help="Do not reverse-search locator-less contract title + execution-date references",
     )
     parser.add_argument("--output", "-o", help="Expanded source packet JSON path; stdout when omitted")
     parser.add_argument("--graph-output", help="Optional source-document graph JSON path")
@@ -101,6 +110,19 @@ def main(argv: list[str] | None = None) -> int:
             max_nodes=args.reference_max_nodes,
             max_candidates_per_exhibit=args.max_candidates_per_exhibit,
         )
+        if not args.no_contract_identity_fallback:
+            expanded = enhance_expanded_packet_with_contract_identity(
+                client,
+                expanded=expanded,
+                cik=snapshot.cik,
+                seed_filings=snapshot.filings,
+                max_depth=args.reference_depth,
+                max_nodes=args.reference_max_nodes,
+                max_contract_search_filings=args.contract_search_max_filings,
+                contract_days_before_execution=args.contract_days_before_execution,
+                contract_days_after_execution=args.contract_days_after_execution,
+                max_candidates_per_exhibit=args.max_candidates_per_exhibit,
+            )
         packet = expanded.packet
         graph_payload = source_document_graph_to_dict(expanded.graph)
 
