@@ -73,6 +73,7 @@ from .legal_name_alias import (
     alias_groups_from_graphs,
     build_legal_name_alias_graph,
     build_legal_name_alias_graph_from_submissions,
+    build_legal_name_alias_graphs,
     legal_name_alias_graph_to_dict,
 )
 from .market import MarketSnapshot, PricePoint, SecurityIdentity
@@ -111,6 +112,7 @@ __all__ = [
     "build_debt_instrument_ledger",
     "build_legal_name_alias_graph",
     "build_legal_name_alias_graph_from_submissions",
+    "build_legal_name_alias_graphs",
     "build_research_bundle",
     "build_sec_instrument_packet",
     "calculate_covenant_addback_sensitivity",
