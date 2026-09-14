@@ -23,7 +23,7 @@ test = [
 transformation-scanner = "transformation_scanner.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["transformation_scanner*"]
+include = ["transformation_scanner*", "research_pipeline*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

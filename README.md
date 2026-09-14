@@ -2,6 +2,28 @@
 
 개인 연구 프로젝트와 실험적 분석 도구를 모아두는 저장소입니다.
 
+## 공통 Research Candidate Pipeline (초안)
+
+서로 다른 탐색기를 하나의 거대한 점수식으로 합치지 않고 공통 실행 구조 위에 올리기 위한 실험적 골격입니다.
+
+```text
+candidate sources
+    ↓
+hydration
+    ↓
+hard filters
+    ↓
+multi-axis scoring
+    ↓
+selection / diversity reranking
+    ↓
+research queue
+```
+
+현재는 기존 `transformation_scanner`를 adapter로 연결할 수 있으며, Top-K와 dependency-free MMR형 diversity selector를 제공합니다. Carvana형 distressed-equity 탐색 로직은 별도 작업과 충돌하지 않도록 구현하지 않고 후속 이슈에서 추적합니다.
+
+자세한 설계와 의도적으로 제외한 범위는 [`docs/RESEARCH_PIPELINE.md`](docs/RESEARCH_PIPELINE.md)를 참고하세요.
+
 ## DART 변신기업 탐색기
 
 가격이 오른 종목을 뒤쫓는 대신, **공시 전후로 상장사의 경제적 성격이 달라지는 순간**을 조기에 찾는 연구 도구입니다.
@@ -69,7 +91,7 @@ python -m transformation_scanner \
 ### 테스트
 
 ```bash
-python -m compileall -q transformation_scanner
+python -m compileall -q transformation_scanner research_pipeline
 python -m pytest
 ```
 
