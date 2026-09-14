@@ -13,6 +13,7 @@ from .agent_results import (
 )
 from .capital_stack_diff import capital_stack_diff_to_dict, diff_capital_stack_packet
 from .contract_graph import enhance_expanded_packet_with_contract_identity
+from .cross_cik import cross_cik_graph_to_dict, expand_packet_with_cross_cik
 from .evidence import EvidenceRecord, validate_point_in_time
 from .io import screening_candidate_from_dict
 from .market import HistoricalMarketProvider, market_snapshot
@@ -110,8 +111,10 @@ def build_research_bundle(
     max_instrument_candidates_per_exhibit: int = 20,
     resolve_incorporated_references: bool = True,
     resolve_contract_identity_references: bool = True,
+    resolve_cross_cik_references: bool = True,
     reference_depth: int = 3,
     reference_max_nodes: int = 80,
+    cross_cik_max_nodes: int = 80,
     contract_search_max_filings: int = 40,
     contract_days_before_execution: int = 30,
     contract_days_after_execution: int = 550,
@@ -153,6 +156,7 @@ def build_research_bundle(
         max_candidates_per_exhibit=max_instrument_candidates_per_exhibit,
     )
     source_graph_payload = None
+    cross_cik_graph_payload = None
     if resolve_incorporated_references:
         expanded = expand_instrument_packet_with_references(
             sec_client,
@@ -176,9 +180,22 @@ def build_research_bundle(
                 contract_days_after_execution=contract_days_after_execution,
                 max_candidates_per_exhibit=max_instrument_candidates_per_exhibit,
             )
-        instrument_packet = expanded.packet
         source_graph_payload = source_document_graph_to_dict(expanded.graph)
         warnings.extend(expanded.graph.warnings)
+        if resolve_cross_cik_references:
+            cross_expanded = expand_packet_with_cross_cik(
+                sec_client,
+                expanded=expanded,
+                root_cik=snapshot.cik,
+                max_depth=reference_depth,
+                max_nodes=cross_cik_max_nodes,
+                max_candidates_per_exhibit=max_instrument_candidates_per_exhibit,
+            )
+            instrument_packet = cross_expanded.packet
+            cross_cik_graph_payload = cross_cik_graph_to_dict(cross_expanded.cross_cik_graph)
+            warnings.extend(cross_expanded.cross_cik_graph.warnings)
+        else:
+            instrument_packet = expanded.packet
     warnings.extend(instrument_packet.warnings)
 
     tasks = [task for task in build_sec_prefill_tasks(snapshot) if task.name != "capital_stack_extractor"]
@@ -217,6 +234,7 @@ def build_research_bundle(
         "capital_stack_diff": capital_stack_diff_to_dict(diff),
         "debt_instrument_source_packet": sec_instrument_packet_to_dict(instrument_packet),
         "source_document_graph": source_graph_payload,
+        "cross_cik_graph": cross_cik_graph_payload,
         "debt_instrument_verification": {
             "task": _jsonable(instrument_task),
             "result_template": instrument_verification_template(instrument_packet),
@@ -278,6 +296,12 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
     graph = packet.get("source_document_graph") or {}
     graph_edges = graph.get("edges", []) if isinstance(graph, dict) else []
     resolved_edges = sum(1 for edge in graph_edges if str(edge.get("status") or "").startswith("resolved"))
+    cross_graph = packet.get("cross_cik_graph") or {}
+    cross_resolutions = cross_graph.get("resolutions", []) if isinstance(cross_graph, dict) else []
+    resolved_cross = sum(1 for item in cross_resolutions if item.get("status") == "resolved_cross_cik")
+    entity_nodes = cross_graph.get("entity_nodes", []) if isinstance(cross_graph, dict) else []
+    entity_roles = cross_graph.get("entity_roles", []) if isinstance(cross_graph, dict) else []
+    entity_relations = cross_graph.get("entity_relations", []) if isinstance(cross_graph, dict) else []
     lines = [
         f"# {bundle.company_name} ({bundle.ticker or 'CIK'}) research workspace",
         "",
@@ -291,17 +315,20 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
         f"- Debt-relevant SEC exhibit documents: {len(source_packet.get('documents', []))}",
         f"- Source-backed debt instrument candidates: {len(source_packet.get('candidates', []))}",
         f"- Incorporation/reference graph edges: {len(graph_edges)} ({resolved_edges} resolved)",
+        f"- Cross-CIK SEC resolutions: {len(cross_resolutions)} ({resolved_cross} resolved)",
+        f"- Explicit legal-entity graph: {len(entity_nodes)} entities / {len(entity_roles)} roles / {len(entity_relations)} relations",
         f"- Cutoff share price: {draft.get('capital_structure', {}).get('current_price')}",
         "",
         "## Research loop",
         "",
         "1. Review filing-to-filing capital-stack changes against source filings.",
         "2. Review the source-document graph; inspect unresolved/ambiguous locator and contract-identity edges.",
-        "3. Review `debt_instrument_template.json`; verify/delete candidate fields against cited exhibit spans.",
-        "4. Feed verified snapshots to `distressed-equity-debt-ledger` for stable instrument identity and amendment tracking.",
-        "5. Have screening agents return the supplied structured result templates.",
-        "6. Use `distressed-equity-covenant` for source-backed maintenance-covenant EBITDA/headroom arithmetic.",
-        "7. Re-run this command with `--result` files or call `distressed-equity-ingest`.",
+        "3. Review `cross_cik_graph.json`; foreign CIK traversal must be backed by explicit SEC CIK/Archives locators.",
+        "4. Review `debt_instrument_template.json`; verify/delete candidate fields against cited exhibit spans.",
+        "5. Feed verified snapshots to `distressed-equity-debt-ledger` for stable instrument identity and amendment tracking.",
+        "6. Have screening agents return the supplied structured result templates.",
+        "7. Use `distressed-equity-covenant` for source-backed maintenance-covenant EBITDA/headroom arithmetic.",
+        "8. Re-run this command with `--result` files or call `distressed-equity-ingest`.",
         "",
     ]
     if merged is not None:
