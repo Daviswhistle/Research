@@ -29,6 +29,10 @@ from .sec_instruments import (
     instrument_verification_template,
     sec_instrument_packet_to_dict,
 )
+from .source_graph import (
+    expand_instrument_packet_with_references,
+    source_document_graph_to_dict,
+)
 
 
 @dataclass(frozen=True)
@@ -103,6 +107,9 @@ def build_research_bundle(
     instrument_filing_limit: int = 6,
     max_instrument_exhibits_per_filing: int = 6,
     max_instrument_candidates_per_exhibit: int = 20,
+    resolve_incorporated_references: bool = True,
+    reference_depth: int = 3,
+    reference_max_nodes: int = 80,
     market_provider: HistoricalMarketProvider | None = None,
     history_years: int = 5,
 ) -> ResearchBundle:
@@ -140,6 +147,20 @@ def build_research_bundle(
         max_exhibits_per_filing=max_instrument_exhibits_per_filing,
         max_candidates_per_exhibit=max_instrument_candidates_per_exhibit,
     )
+    source_graph_payload = None
+    if resolve_incorporated_references:
+        expanded = expand_instrument_packet_with_references(
+            sec_client,
+            packet=instrument_packet,
+            cik=snapshot.cik,
+            seed_filings=snapshot.filings,
+            max_depth=reference_depth,
+            max_nodes=reference_max_nodes,
+            max_candidates_per_exhibit=max_instrument_candidates_per_exhibit,
+        )
+        instrument_packet = expanded.packet
+        source_graph_payload = source_document_graph_to_dict(expanded.graph)
+        warnings.extend(expanded.graph.warnings)
     warnings.extend(instrument_packet.warnings)
 
     tasks = [task for task in build_sec_prefill_tasks(snapshot) if task.name != "capital_stack_extractor"]
@@ -177,6 +198,7 @@ def build_research_bundle(
         "capital_stack_packet": capital_stack_packet_to_dict(capital_stack),
         "capital_stack_diff": capital_stack_diff_to_dict(diff),
         "debt_instrument_source_packet": sec_instrument_packet_to_dict(instrument_packet),
+        "source_document_graph": source_graph_payload,
         "debt_instrument_verification": {
             "task": _jsonable(instrument_task),
             "result_template": instrument_verification_template(instrument_packet),
@@ -235,6 +257,9 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
     draft = packet["screening_draft"]["screening_candidate_draft"]
     diff = packet.get("capital_stack_diff") or {}
     source_packet = packet.get("debt_instrument_source_packet") or {}
+    graph = packet.get("source_document_graph") or {}
+    graph_edges = graph.get("edges", []) if isinstance(graph, dict) else []
+    resolved_edges = sum(1 for edge in graph_edges if edge.get("status") == "resolved")
     lines = [
         f"# {bundle.company_name} ({bundle.ticker or 'CIK'}) research workspace",
         "",
@@ -247,16 +272,18 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
         f"- Filing-to-filing change candidates: {len(diff.get('changes', []))}",
         f"- Debt-relevant SEC exhibit documents: {len(source_packet.get('documents', []))}",
         f"- Source-backed debt instrument candidates: {len(source_packet.get('candidates', []))}",
+        f"- Incorporation/reference graph edges: {len(graph_edges)} ({resolved_edges} resolved)",
         f"- Cutoff share price: {draft.get('capital_structure', {}).get('current_price')}",
         "",
         "## Research loop",
         "",
         "1. Review filing-to-filing capital-stack changes against source filings.",
-        "2. Review `debt_instrument_template.json`; verify/delete candidate fields against cited exhibit spans.",
-        "3. Feed verified snapshots to `distressed-equity-debt-ledger` for stable instrument identity and amendment tracking.",
-        "4. Have screening agents return the supplied structured result templates.",
-        "5. Use `distressed-equity-covenant` for source-backed maintenance-covenant EBITDA/headroom arithmetic.",
-        "6. Re-run this command with `--result` files or call `distressed-equity-ingest`.",
+        "2. Review the source-document graph; inspect unresolved/ambiguous incorporation-by-reference edges.",
+        "3. Review `debt_instrument_template.json`; verify/delete candidate fields against cited exhibit spans.",
+        "4. Feed verified snapshots to `distressed-equity-debt-ledger` for stable instrument identity and amendment tracking.",
+        "5. Have screening agents return the supplied structured result templates.",
+        "6. Use `distressed-equity-covenant` for source-backed maintenance-covenant EBITDA/headroom arithmetic.",
+        "7. Re-run this command with `--result` files or call `distressed-equity-ingest`.",
         "",
     ]
     if merged is not None:
