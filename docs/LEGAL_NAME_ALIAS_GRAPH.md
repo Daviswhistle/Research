@@ -104,6 +104,8 @@ facebook inc == meta platforms inc
 
 2020년 분석에 2021년 이후 rename을 넣으면 hindsight다.
 
+Research workspace의 `snapshot.company_name`, evidence claim, summary display도 `Facebook Inc.`를 사용한다. 현재 SEC 이름인 `Meta Platforms, Inc.`가 과거 workspace 표시명으로 새어 들어오지 않는다.
+
 ### cutoff = 2022-12-31
 
 rename boundary가 cutoff 이전이므로:
@@ -119,8 +121,6 @@ alias set = {
 
 ## Future-current-name withholding
 
-더 까다로운 경우도 있다.
-
 현재 SEC `name`은 미래 이름인데 `formerNames` history가 모두 분석 cutoff 뒤에만 존재할 수 있다.
 
 이 경우 현재 이름을 과거 이름으로 추정하지 않는다.
@@ -129,7 +129,7 @@ alias set = {
 canonical_name_as_of = null
 ```
 
-로 남긴다.
+로 남긴다. Research workspace는 이 경우 현재 이름 대신 CIK를 표시명 fallback으로 사용한다.
 
 즉 모르는 것을 현재 이름으로 backfill하지 않는다.
 
@@ -202,7 +202,7 @@ CIK 추정
 
 따라서 legal-name alias graph는 cross-CIK traversal을 허가하는 근거가 아니다. 이미 SEC evidence로 확정된 CIK의 identity history를 보강하는 artifact다.
 
-`cross_cik_graph.json`에는 발견된 CIK들의 cutoff-safe `legal_name_alias_graphs`도 함께 frozen 된다.
+`cross_cik_graph.json`에는 root CIK와 명시적으로 발견된 foreign CIK들의 cutoff-safe `legal_name_alias_graphs`를 함께 frozen 한다. Auxiliary foreign-name lookup이 실패해도 이미 source-backed인 cross-CIK document resolution 자체는 무효화하지 않고 warning으로 남긴다.
 
 ## Workspace artifacts
 
