@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from typing import Any, Iterable
 
@@ -134,8 +134,6 @@ def build_research_bundle(
         forms=("10-K", "10-K/A", "10-Q", "10-Q/A", "8-K", "8-K/A"),
         filing_limit=max(filing_limit * 4, instrument_filing_limit * 2, 20),
     )
-    evidence = list(snapshot_to_evidence(snapshot))
-    screening_draft = build_screening_draft(snapshot)
     warnings = list(snapshot.warnings)
 
     legal_name_graph = build_legal_name_alias_graph(
@@ -146,6 +144,13 @@ def build_research_bundle(
     legal_name_payload = legal_name_alias_graph_to_dict(legal_name_graph)
     legal_alias_groups = alias_groups_from_graphs((legal_name_graph,))
     warnings.extend(legal_name_graph.warnings)
+
+    point_in_time_name = legal_name_graph.canonical_name_as_of or snapshot.cik
+    if point_in_time_name != snapshot.company_name:
+        snapshot = replace(snapshot, company_name=point_in_time_name)
+
+    evidence = list(snapshot_to_evidence(snapshot))
+    screening_draft = build_screening_draft(snapshot)
 
     capital_stack = build_capital_stack_packet(
         sec_client,
