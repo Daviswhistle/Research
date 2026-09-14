@@ -31,19 +31,19 @@ output/cvna_2022-12-31/
 
 `research_packet.json`은 agent-result ingestion의 canonical input이다.
 
-## Frozen packet 원칙
+## Frozen packet rule
 
-한 번 생성된 `research_packet.json`이 존재하면 같은 workspace의 후속 실행은 기본적으로 그 packet을 재사용한다. Historical replay 중간에 SEC/market source를 다시 fetch해 입력 상태가 바뀌는 것을 막기 위한 것이다.
+같은 workspace를 다시 실행하면 기본적으로 기존 `research_packet.json`을 재사용한다. SEC나 market provider를 다시 호출하지 않는다.
 
-의도적으로 다시 수집하려면:
+이 규칙은 historical replay의 재현성을 위한 것이다. Agent result가 며칠 뒤 도착하더라도 처음 연구를 시작했을 때의 point-in-time input이 바뀌면 안 된다.
+
+데이터를 의도적으로 다시 수집할 때만:
 
 ```bash
-distressed-equity-research ... --refresh
+--refresh
 ```
 
-를 사용한다.
-
-기존 packet의 `analysis_date`와 새 명령의 cutoff가 다르면 자동 재사용하지 않고 오류를 낸다.
+를 사용한다. 요청한 `analysis_date`와 frozen packet의 cutoff가 다르면 재사용을 거부한다.
 
 ## Agent 단계
 
@@ -66,6 +66,30 @@ distressed-equity-covenant covenant_input.json -o covenant_result.json
 
 을 사용한다. 출력의 `agent_result`는 ingestion에 바로 사용할 수 있다.
 
+`disputed_add_backs`가 있으면 claimed/conservative/개별 제외 sensitivity가 같이 계산된다. 결과가 `disputed_addbacks_flip_outcome`이면 compliance 결론이 해당 add-back 해석에 의존한다는 뜻이다.
+
+## Debt instrument identity 단계
+
+Agent가 filing별 debt instrument snapshot을 구조화했다면 별도의 stable-ID ledger를 만든다.
+
+```bash
+distressed-equity-research \
+  --ticker CVNA \
+  --analysis-date 2022-12-31 \
+  --workspace output/cvna_2022-12-31 \
+  --debt-instruments debt_instruments.json
+```
+
+생성물:
+
+```text
+debt_instrument_ledger.json
+```
+
+CUSIP/ISIN이 있으면 이를 우선 사용하고, 없으면 이름/type/maturity/coupon/seniority/security를 이용한 보수적 heuristic matching을 사용한다. Match가 애매하면 자동으로 합치지 않는다.
+
+이 ledger는 후속 해석 artifact이므로 frozen `research_packet.json`에 쓰지 않는다. Agent-result ingestion과 함께 실행하면 `merged.json`에도 ledger가 첨부된다.
+
 ## 2차 실행: validated result ingest + screen
 
 ```bash
@@ -73,6 +97,7 @@ distressed-equity-research \
   --ticker CVNA \
   --analysis-date 2022-12-31 \
   --workspace output/cvna_2022-12-31 \
+  --debt-instruments debt_instruments.json \
   --result output/capital_stack_result.json \
   --result output/market_result.json \
   --result output/normalization_result.json
@@ -95,7 +120,7 @@ merged.json
 ```text
 raw evidence
     ↓
-research packet
+research packet (frozen)
     ↓
 agent result proposal
     ↓
@@ -139,5 +164,6 @@ workspace의 `capital_stack_diff.json`은 최근 point-in-time filings 사이에
 - future refinancing success
 - point success probability
 - peak market cap을 price proxy로 대체하는 계산
+- ambiguous debt instrument identity의 강제 matching
 
 이 경계를 유지해야 historical replay가 결과를 알고 난 뒤의 hindsight로 오염되지 않는다.
