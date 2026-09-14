@@ -81,5 +81,7 @@ def test_future_former_name_interval_is_not_added_to_historical_aliases():
         cik="1",
         analysis_date=date(2023, 12, 31),
     )
+    assert graph.canonical_name_as_of is None
     assert graph.records == ()
     assert graph.transitions == ()
+    assert any("withheld" in warning for warning in graph.warnings)
