@@ -9,6 +9,7 @@ from .contract_parties import ContractParty, normalize_party_name
 from .cross_cik import cik_from_accession
 from .legal_name_alias import build_legal_name_alias_graph
 from .sec import SecClient, normalize_cik
+from .sec_cik_lookup import SecCikLookupMatch, fetch_cik_lookup_matches
 from .sec_instruments import FilingDocument, SecInstrumentPacket, _get_text, extract_source_candidates
 from .source_graph import REFERENCE_FORMS, SourceGraphNode
 
@@ -74,6 +75,7 @@ def _registry_candidates(
     client: SecClient,
     party: ContractParty,
     known_legal_name_graphs: Iterable[LegalNameGraphLike],
+    all_cik_matches: dict[str, tuple[SecCikLookupMatch, ...]] | None = None,
 ) -> tuple[ExternalEntityCandidate, ...]:
     target = party.normalized_name
     candidates: list[ExternalEntityCandidate] = []
@@ -114,6 +116,18 @@ def _registry_candidates(
             candidates.append(item)
             seen.add(_candidate_key(item))
 
+    for match in (all_cik_matches or {}).get(target, ()):
+        item = ExternalEntityCandidate(
+            normalized_name=target,
+            cik=normalize_cik(match.cik),
+            registry_title=match.name,
+            ticker=None,
+            source_kind="sec_cik_lookup_data_candidate_only",
+        )
+        if _candidate_key(item) not in seen:
+            candidates.append(item)
+            seen.add(_candidate_key(item))
+
     return tuple(candidates)
 
 
@@ -148,11 +162,12 @@ def resolve_named_entity_contracts(
 ) -> NamedEntityContractExpansion:
     """Resolve name-only external contract parties only after SEC-backed confirmation.
 
-    Current SEC company-title data is candidate generation only. A CIK is usable
-    only if that CIK had a filing by the source date and its cutoff-safe SEC
-    legal-name graph contains the exact normalized party name. The contract is
-    then reverse-searched inside every confirmed CIK. Automatic resolution occurs
-    only when exactly one (CIK, exhibit URL) survives all checks.
+    Current ticker metadata and the SEC's historically cumulative all-CIK/name list
+    are candidate generation only. A CIK is usable only if that CIK had a filing by
+    the source date and its cutoff-safe SEC legal-name graph contains the exact
+    normalized party name. The contract is then reverse-searched inside every
+    confirmed CIK. Automatic resolution occurs only when exactly one
+    (CIK, exhibit URL) survives all checks.
     """
 
     root_cik = normalize_cik(root_cik)
@@ -165,7 +180,11 @@ def resolve_named_entity_contracts(
     index_cache: dict[str, tuple[FilingDocument, ...]] = {}
     confirmation_cache: dict[tuple[str, date, str], tuple[bool, tuple[str, ...], tuple]] = {}
     seen_identity_keys: set[tuple] = set()
+    work_items: list[tuple[SourceGraphNode, str, ContractIdentity, ContractParty]] = []
 
+    # First collect all role-labelled contract parties so the large cumulative CIK
+    # file can be scanned once for the entire research packet rather than once per
+    # party occurrence.
     for source in sorted(source_nodes, key=lambda item: (item.depth, item.node_id)):
         if source.filing_date > packet.analysis_date:
             continue
@@ -185,132 +204,147 @@ def resolve_named_entity_contracts(
                 if identity_key in seen_identity_keys:
                     continue
                 seen_identity_keys.add(identity_key)
+                work_items.append((source, source_cik, identity, party))
 
-                candidates = _registry_candidates(client, party, known_legal_name_graphs)
-                all_candidates.extend(candidates)
-                candidate_ciks = tuple(sorted({item.cik for item in candidates if item.cik != source_cik}))
-                confirmed: list[tuple[str, tuple[str, ...], tuple]] = []
+    requested_names = {party.normalized_name for _source, _source_cik, _identity, party in work_items}
+    try:
+        all_cik_matches = fetch_cik_lookup_matches(client, requested_names)
+    except Exception as exc:
+        all_cik_matches = {}
+        if requested_names:
+            warnings.append(f"failed SEC cumulative CIK/name candidate lookup: {exc}")
 
-                for candidate_cik in candidate_ciks:
-                    cache_key = (candidate_cik, source.filing_date, party.normalized_name)
-                    cached = confirmation_cache.get(cache_key)
-                    if cached is None:
-                        try:
-                            existence_filings = tuple(
-                                item
-                                for item in client.filings_as_of(candidate_cik, source.filing_date, forms=())
-                                if item.filing_date <= source.filing_date
-                            )
-                        except Exception as exc:
-                            warnings.append(
-                                f"failed historical existence check for named entity CIK {candidate_cik}: {exc}"
-                            )
-                            cached = (False, (), ())
-                            confirmation_cache[cache_key] = cached
-                            continue
-                        if not existence_filings:
-                            cached = (False, (), ())
-                            confirmation_cache[cache_key] = cached
-                            continue
-                        try:
-                            name_graph = build_legal_name_alias_graph(
-                                client,
-                                cik=candidate_cik,
-                                analysis_date=source.filing_date,
-                            )
-                        except Exception as exc:
-                            warnings.append(
-                                f"failed source-date legal-name confirmation for CIK {candidate_cik}: {exc}"
-                            )
-                            cached = (False, (), existence_filings)
-                            confirmation_cache[cache_key] = cached
-                            continue
-                        alias_names = tuple(name_graph.alias_names)
-                        confirmed_name = party.normalized_name in set(alias_names)
-                        cached = (confirmed_name, alias_names, existence_filings)
-                        confirmation_cache[cache_key] = cached
-                    if cached[0]:
-                        confirmed.append((candidate_cik, cached[1], cached[2]))
+    for source, source_cik, identity, party in work_items:
+        candidates = _registry_candidates(
+            client,
+            party,
+            known_legal_name_graphs,
+            all_cik_matches=all_cik_matches,
+        )
+        all_candidates.extend(candidates)
+        candidate_ciks = tuple(sorted({item.cik for item in candidates if item.cik != source_cik}))
+        confirmed: list[tuple[str, tuple[str, ...], tuple]] = []
 
-                matches: dict[tuple[str, str], FilingDocument] = {}
-                confirmed_ciks: list[str] = []
-                search_warnings: list[str] = []
-                for candidate_cik, alias_names, _existence_filings in confirmed:
-                    confirmed_ciks.append(candidate_cik)
-                    try:
-                        filings = client.filings_as_of(
-                            candidate_cik,
-                            source.filing_date,
-                            forms=REFERENCE_FORMS,
-                        )
-                    except Exception as exc:
-                        search_warnings.append(
-                            f"failed contract filing lookup for named entity CIK {candidate_cik}: {exc}"
-                        )
-                        continue
-                    search = reverse_search_contract_identity(
+        for candidate_cik in candidate_ciks:
+            cache_key = (candidate_cik, source.filing_date, party.normalized_name)
+            cached = confirmation_cache.get(cache_key)
+            if cached is None:
+                try:
+                    existence_filings = tuple(
+                        item
+                        for item in client.filings_as_of(candidate_cik, source.filing_date, forms=())
+                        if item.filing_date <= source.filing_date
+                    )
+                except Exception as exc:
+                    warnings.append(
+                        f"failed historical existence check for named entity CIK {candidate_cik}: {exc}"
+                    )
+                    cached = (False, (), ())
+                    confirmation_cache[cache_key] = cached
+                    continue
+                if not existence_filings:
+                    cached = (False, (), ())
+                    confirmation_cache[cache_key] = cached
+                    continue
+                try:
+                    name_graph = build_legal_name_alias_graph(
                         client,
-                        identity=identity,
-                        filings=filings,
-                        source_published_on=source.filing_date,
-                        max_filings=max_contract_search_filings,
-                        days_before_execution=contract_days_before_execution,
-                        days_after_execution=contract_days_after_execution,
-                        index_cache=index_cache,
-                        text_cache=text_cache,
-                        alias_groups=(alias_names,) if len(alias_names) > 1 else (),
+                        cik=candidate_cik,
+                        analysis_date=source.filing_date,
                     )
-                    search_warnings.extend(search.warnings)
-                    for document in search.candidates:
-                        matches[(candidate_cik, document.url)] = document
-                warnings.extend(search_warnings)
-
-                status: str
-                reason: str
-                target_cik: str | None = None
-                target_accession: str | None = None
-                target_document_url: str | None = None
-                if not candidate_ciks:
-                    status = "no_candidate_cik"
-                    reason = "no exact normalized SEC registry/legal-name candidate"
-                elif not confirmed_ciks:
-                    status = "name_not_confirmed_at_source_date"
-                    reason = "candidate CIKs lacked source-date SEC name evidence"
-                elif not matches:
-                    status = "contract_not_found_in_confirmed_cik"
-                    reason = "source-date name-confirmed CIKs had no matching historical contract exhibit"
-                elif len(matches) > 1:
-                    status = "ambiguous_named_entity_contract"
-                    reason = f"{len(matches)} (CIK, exhibit) matches survived; no automatic selection"
-                else:
-                    (target_cik, target_document_url), document = next(iter(matches.items()))
-                    target_accession = document.source_accession
-                    resolved_documents[document.url] = document
-                    status = "resolved_named_entity_contract"
-                    reason = "unique source-date SEC name confirmation plus unique contract identity match"
-
-                resolutions.append(
-                    NamedEntityContractResolution(
-                        resolution_id=f"named-entity-resolution:{len(resolutions) + 1}",
-                        source_node_id=source.node_id,
-                        source_cik=source_cik,
-                        source_accession=source.accession_number,
-                        source_published_on=source.filing_date,
-                        source_depth=source.depth,
-                        contract_kind=identity.kind,
-                        execution_date=identity.execution_date,
-                        party_role=party.role,
-                        party_name=party.name,
-                        normalized_party_name=party.normalized_name,
-                        candidate_ciks=candidate_ciks,
-                        confirmed_ciks=tuple(sorted(set(confirmed_ciks))),
-                        status=status,
-                        reason=reason,
-                        target_cik=target_cik,
-                        target_accession=target_accession,
-                        target_document_url=target_document_url,
+                except Exception as exc:
+                    warnings.append(
+                        f"failed source-date legal-name confirmation for CIK {candidate_cik}: {exc}"
                     )
+                    cached = (False, (), existence_filings)
+                    confirmation_cache[cache_key] = cached
+                    continue
+                alias_names = tuple(name_graph.alias_names)
+                confirmed_name = party.normalized_name in set(alias_names)
+                cached = (confirmed_name, alias_names, existence_filings)
+                confirmation_cache[cache_key] = cached
+            if cached[0]:
+                confirmed.append((candidate_cik, cached[1], cached[2]))
+
+        matches: dict[tuple[str, str], FilingDocument] = {}
+        confirmed_ciks: list[str] = []
+        search_warnings: list[str] = []
+        for candidate_cik, alias_names, _existence_filings in confirmed:
+            confirmed_ciks.append(candidate_cik)
+            try:
+                filings = client.filings_as_of(
+                    candidate_cik,
+                    source.filing_date,
+                    forms=REFERENCE_FORMS,
                 )
+            except Exception as exc:
+                search_warnings.append(
+                    f"failed contract filing lookup for named entity CIK {candidate_cik}: {exc}"
+                )
+                continue
+            search = reverse_search_contract_identity(
+                client,
+                identity=identity,
+                filings=filings,
+                source_published_on=source.filing_date,
+                max_filings=max_contract_search_filings,
+                days_before_execution=contract_days_before_execution,
+                days_after_execution=contract_days_after_execution,
+                index_cache=index_cache,
+                text_cache=text_cache,
+                alias_groups=(alias_names,) if len(alias_names) > 1 else (),
+            )
+            search_warnings.extend(search.warnings)
+            for document in search.candidates:
+                matches[(candidate_cik, document.url)] = document
+        warnings.extend(search_warnings)
+
+        status: str
+        reason: str
+        target_cik: str | None = None
+        target_accession: str | None = None
+        target_document_url: str | None = None
+        if not candidate_ciks:
+            status = "no_candidate_cik"
+            reason = "no exact normalized SEC registry/legal-name candidate"
+        elif not confirmed_ciks:
+            status = "name_not_confirmed_at_source_date"
+            reason = "candidate CIKs lacked source-date SEC name evidence"
+        elif not matches:
+            status = "contract_not_found_in_confirmed_cik"
+            reason = "source-date name-confirmed CIKs had no matching historical contract exhibit"
+        elif len(matches) > 1:
+            status = "ambiguous_named_entity_contract"
+            reason = f"{len(matches)} (CIK, exhibit) matches survived; no automatic selection"
+        else:
+            (target_cik, target_document_url), document = next(iter(matches.items()))
+            target_accession = document.source_accession
+            resolved_documents[document.url] = document
+            status = "resolved_named_entity_contract"
+            reason = "unique source-date SEC name confirmation plus unique contract identity match"
+
+        resolutions.append(
+            NamedEntityContractResolution(
+                resolution_id=f"named-entity-resolution:{len(resolutions) + 1}",
+                source_node_id=source.node_id,
+                source_cik=source_cik,
+                source_accession=source.accession_number,
+                source_published_on=source.filing_date,
+                source_depth=source.depth,
+                contract_kind=identity.kind,
+                execution_date=identity.execution_date,
+                party_role=party.role,
+                party_name=party.name,
+                normalized_party_name=party.normalized_name,
+                candidate_ciks=candidate_ciks,
+                confirmed_ciks=tuple(sorted(set(confirmed_ciks))),
+                status=status,
+                reason=reason,
+                target_cik=target_cik,
+                target_accession=target_accession,
+                target_document_url=target_document_url,
+            )
+        )
 
     existing_urls = {item.url for item in packet.documents}
     documents = list(packet.documents)
