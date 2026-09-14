@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_results import agent_result_template
+from .capital_stack_diff import capital_stack_diff_to_dict, diff_capital_stack_packet
 from .sec import SecClient
 from .sec_debt import (
     build_capital_stack_agent_task,
@@ -28,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--filing-limit", type=int, default=3)
     parser.add_argument("--max-snippets-per-filing", type=int, default=50)
     parser.add_argument("--output", "-o", help="Capital-stack packet JSON path")
+    parser.add_argument("--diff-output", help="Optional filing-to-filing candidate diff JSON path")
     parser.add_argument("--task-output", help="Optional agent task JSON path")
     return parser
 
@@ -75,6 +77,8 @@ def main(argv: list[str] | None = None) -> int:
         max_snippets_per_filing=args.max_snippets_per_filing,
     )
     _write(args.output, capital_stack_packet_to_dict(packet))
+    if args.diff_output:
+        _write(args.diff_output, capital_stack_diff_to_dict(diff_capital_stack_packet(packet)))
     if args.task_output:
         task = build_capital_stack_agent_task(packet)
         _write(
@@ -85,6 +89,10 @@ def main(argv: list[str] | None = None) -> int:
                 "analysis_date": cutoff.isoformat(),
                 "task": asdict(task),
                 "result_template": agent_result_template(task.name, cutoff),
+                "covenant_model_note": (
+                    "For maintenance-covenant headroom, reconstruct the contractual EBITDA definition and run "
+                    "distressed-equity-covenant; ingest its generated capital_stack_extractor result rather than doing ratio arithmetic in free text."
+                ),
             },
         )
     return 0
