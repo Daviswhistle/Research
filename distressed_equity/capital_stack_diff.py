@@ -138,9 +138,15 @@ def diff_capital_stack_packet(packet: CapitalStackPacket) -> CapitalStackDiffRep
 
 
 def capital_stack_diff_to_dict(report: CapitalStackDiffReport) -> dict[str, Any]:
-    payload = asdict(report)
-    payload["analysis_date"] = report.analysis_date.isoformat()
-    for item in payload["changes"]:
-        item["from_filing_date"] = item["from_filing_date"].isoformat()
-        item["to_filing_date"] = item["to_filing_date"].isoformat()
-    return payload
+    def convert(value: Any) -> Any:
+        if isinstance(value, date):
+            return value.isoformat()
+        if isinstance(value, tuple):
+            return [convert(item) for item in value]
+        if isinstance(value, list):
+            return [convert(item) for item in value]
+        if isinstance(value, dict):
+            return {key: convert(item) for key, item in value.items()}
+        return value
+
+    return convert(asdict(report))
