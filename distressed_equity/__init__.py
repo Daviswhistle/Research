@@ -76,6 +76,18 @@ from .legal_name_alias import (
     build_legal_name_alias_graphs,
     legal_name_alias_graph_to_dict,
 )
+from .legal_name_header import (
+    CompleteSubmissionFormerName,
+    CompleteSubmissionNameEvidence,
+    complete_submission_text_url,
+    extract_complete_submission_name_evidence,
+    fetch_complete_submission_name_evidence,
+)
+from .legal_name_reconcile import (
+    LegalNameSourceComparison,
+    ReconciledLegalNameAliasGraph,
+    reconcile_legal_name_sources,
+)
 from .market import MarketSnapshot, PricePoint, SecurityIdentity
 from .orchestration import ResearchBundle, build_research_bundle, ingest_research_bundle
 from .replay import DistressScanConfig, MarketDistressSeed, run_historical_replay
@@ -119,6 +131,9 @@ __all__ = [
     "calculate_covenant_headroom",
     "CapitalStackDiffReport",
     "case_from_dict",
+    "CompleteSubmissionFormerName",
+    "CompleteSubmissionNameEvidence",
+    "complete_submission_text_url",
     "ContractIdentity",
     "ContractParty",
     "ContractSearchResult",
@@ -146,11 +161,13 @@ __all__ = [
     "ExpandedInstrumentPacket",
     "expand_instrument_packet_with_references",
     "expand_packet_with_cross_cik",
+    "extract_complete_submission_name_evidence",
     "extract_contract_identities",
     "extract_contract_parties",
     "extract_cross_cik_references",
     "extract_explicit_legal_entity_evidence",
     "extract_source_references",
+    "fetch_complete_submission_name_evidence",
     "FilingDocument",
     "ingest_agent_results",
     "ingest_research_bundle",
@@ -163,6 +180,7 @@ __all__ = [
     "LegalEntityRole",
     "LegalNameAliasGraph",
     "LegalNameRecord",
+    "LegalNameSourceComparison",
     "LegalNameTransition",
     "legal_name_alias_graph_to_dict",
     "load_case",
@@ -173,6 +191,8 @@ __all__ = [
     "party_fingerprint",
     "PatchProposal",
     "PricePoint",
+    "ReconciledLegalNameAliasGraph",
+    "reconcile_legal_name_sources",
     "required_probability",
     "ResearchBundle",
     "resolve_cross_cik_graph",
