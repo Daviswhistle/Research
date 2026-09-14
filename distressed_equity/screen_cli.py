@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
+from datetime import date
 import json
 from pathlib import Path
 
+from .agent_results import agent_result_template
 from .agents import build_screening_tasks
 from .io import load_screening_universe
 from .screen_report import render_universe_markdown
@@ -58,6 +60,12 @@ def main(argv: list[str] | None = None) -> int:
             candidate = candidates_by_ticker[result.ticker]
             tasks = build_screening_tasks(candidate, result)
             if tasks:
+                cutoff = date.fromisoformat(candidate.analysis_date) if candidate.analysis_date else None
+                templates = (
+                    {task.name: agent_result_template(task.name, cutoff) for task in tasks}
+                    if cutoff is not None
+                    else {}
+                )
                 manifest.append(
                     {
                         "ticker": result.ticker,
@@ -65,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
                         "priority": result.priority,
                         "analysis_date": candidate.analysis_date,
                         "tasks": [asdict(task) for task in tasks],
+                        "result_templates": templates,
                     }
                 )
         _write_json(args.tasks_output, manifest)
