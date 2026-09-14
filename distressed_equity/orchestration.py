@@ -12,6 +12,7 @@ from .agent_results import (
     ingestion_report_to_dict,
 )
 from .capital_stack_diff import capital_stack_diff_to_dict, diff_capital_stack_packet
+from .contract_graph import enhance_expanded_packet_with_contract_identity
 from .evidence import EvidenceRecord, validate_point_in_time
 from .io import screening_candidate_from_dict
 from .market import HistoricalMarketProvider, market_snapshot
@@ -108,8 +109,12 @@ def build_research_bundle(
     max_instrument_exhibits_per_filing: int = 6,
     max_instrument_candidates_per_exhibit: int = 20,
     resolve_incorporated_references: bool = True,
+    resolve_contract_identity_references: bool = True,
     reference_depth: int = 3,
     reference_max_nodes: int = 80,
+    contract_search_max_filings: int = 40,
+    contract_days_before_execution: int = 30,
+    contract_days_after_execution: int = 550,
     market_provider: HistoricalMarketProvider | None = None,
     history_years: int = 5,
 ) -> ResearchBundle:
@@ -158,6 +163,19 @@ def build_research_bundle(
             max_nodes=reference_max_nodes,
             max_candidates_per_exhibit=max_instrument_candidates_per_exhibit,
         )
+        if resolve_contract_identity_references:
+            expanded = enhance_expanded_packet_with_contract_identity(
+                sec_client,
+                expanded=expanded,
+                cik=snapshot.cik,
+                seed_filings=snapshot.filings,
+                max_depth=reference_depth,
+                max_nodes=reference_max_nodes,
+                max_contract_search_filings=contract_search_max_filings,
+                contract_days_before_execution=contract_days_before_execution,
+                contract_days_after_execution=contract_days_after_execution,
+                max_candidates_per_exhibit=max_instrument_candidates_per_exhibit,
+            )
         instrument_packet = expanded.packet
         source_graph_payload = source_document_graph_to_dict(expanded.graph)
         warnings.extend(expanded.graph.warnings)
@@ -259,7 +277,7 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
     source_packet = packet.get("debt_instrument_source_packet") or {}
     graph = packet.get("source_document_graph") or {}
     graph_edges = graph.get("edges", []) if isinstance(graph, dict) else []
-    resolved_edges = sum(1 for edge in graph_edges if edge.get("status") == "resolved")
+    resolved_edges = sum(1 for edge in graph_edges if str(edge.get("status") or "").startswith("resolved"))
     lines = [
         f"# {bundle.company_name} ({bundle.ticker or 'CIK'}) research workspace",
         "",
@@ -278,7 +296,7 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
         "## Research loop",
         "",
         "1. Review filing-to-filing capital-stack changes against source filings.",
-        "2. Review the source-document graph; inspect unresolved/ambiguous incorporation-by-reference edges.",
+        "2. Review the source-document graph; inspect unresolved/ambiguous locator and contract-identity edges.",
         "3. Review `debt_instrument_template.json`; verify/delete candidate fields against cited exhibit spans.",
         "4. Feed verified snapshots to `distressed-equity-debt-ledger` for stable instrument identity and amendment tracking.",
         "5. Have screening agents return the supplied structured result templates.",
