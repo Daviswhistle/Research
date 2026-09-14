@@ -116,6 +116,9 @@ def _write_bundle_artifacts(workspace: Path, bundle: ResearchBundle) -> None:
     _write_json(workspace / "capital_stack.json", packet["capital_stack_packet"])
     _write_json(workspace / "capital_stack_diff.json", packet["capital_stack_diff"])
     _write_json(workspace / "tasks.json", {"tasks": packet["agent_tasks"]})
+    legal_name_graph = packet.get("legal_name_alias_graph")
+    if legal_name_graph is not None:
+        _write_json(workspace / "legal_name_alias_graph.json", legal_name_graph)
     source_packet = packet.get("debt_instrument_source_packet")
     if source_packet is not None:
         _write_json(workspace / "debt_instrument_sources.json", source_packet)
