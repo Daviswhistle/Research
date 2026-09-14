@@ -95,7 +95,7 @@ ENTITY NAME:CIK:
 11:11 CAPITAL CORP.:0001463262:
 ```
 
-또한 이 파일은 대용량이므로 전체 100만 행 수준 registry를 Python dict로 영구 확장하지 않는다. 먼저 research packet의 source documents에서 필요한 normalized party name 집합을 수집한 뒤, SEC 파일을 한 번 선형 스캔해 그 이름들만 추출한다. Raw response는 같은 `SecClient` 인스턴스에서 캐시해 반복 다운로드를 막는다.
+또한 이 파일은 대용량이므로 전체 registry를 Python dict로 영구 확장하지 않는다. 먼저 research packet의 source documents에서 필요한 normalized party name 집합을 수집한 뒤, SEC 파일을 한 번 선형 스캔해 그 이름들만 추출한다. Raw response는 같은 `SecClient` 인스턴스에서 캐시해 반복 다운로드를 막는다.
 
 ## 3. Source-date SEC confirmation
 
@@ -240,6 +240,21 @@ global_depth = entry_global_depth + local_node.depth
 - target filer가 public EDGAR filing history를 갖지 않아 contract confirmation이 불가능한 경우
 
 이 경계는 fuzzy web/company search로 메우지 않는다.
+
+## Next graph-closure phase
+
+Named-entity resolver가 유일하게 확인한 새 exhibit는 현재 debt source packet에는 합쳐진다. 하지만 그 exhibit 자체가 새로운 명시적 SEC Archives URL / CIK / accession을 포함할 경우, 그 문서를 seed로 explicit cross-CIK closure를 다시 실행하지는 않는다.
+
+다음 단계는:
+
+```text
+named-entity unique contract exhibit
+    -> explicit cross-CIK scan
+    -> foreign entry
+    -> same exact global-depth / alias / locator-less closure rules
+```
+
+로 재진입시키는 것이다. 이때도 name-origin provenance와 explicit locator provenance는 구분해 보존해야 한다.
 
 ## Safety properties
 
