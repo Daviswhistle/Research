@@ -226,7 +226,7 @@ distressed-equity-research \
   --workspace output/cvna_2022-12-31
 ```
 
-동일 CIK의 법적 명칭 변경은 SEC submissions의 former-name metadata가 **분석 cutoff 이전에 확인해 주는 경우만** alias로 연결합니다. 미래 rename은 과거 contract party matching에 쓰지 않으며, `legal_name_alias_graph.json`에 당시 canonical name과 완료된 rename transition을 별도로 보존합니다.
+동일 CIK의 법적 명칭 변경은 SEC submissions의 former-name metadata가 **분석 cutoff 이전에 확인해 주는 경우만** alias로 연결합니다. 미래 rename은 과거 contract party matching에 쓰지 않으며, 과거 workspace의 표시명과 evidence에도 미래 current name이 새지 않도록 당시 canonical name을 사용합니다. `formerNames.from/to`는 이 파이프라인에서 SEC identity metadata의 시간 경계로 취급하며 주법상 법적 효력일로 단정하지 않습니다. 결과는 `legal_name_alias_graph.json`에 별도로 보존합니다.
 
 Cross-CIK 탐색은 SEC Archives URL, 명시 CIK, exact accession처럼 **source가 target CIK를 직접 증명하는 경우만** 허용합니다. 회사명만으로 다른 CIK를 추정하지 않습니다. `cross_cik_graph.json`은 foreign source resolution과 explicit borrower/issuer/guarantor/subsidiary evidence를 별도 provenance graph로 보존하고, 이미 명시적으로 발견된 foreign CIK들의 cutoff-safe legal-name history도 함께 freeze합니다.
 
