@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime
 import re
 from typing import Any, Iterable
@@ -81,6 +81,8 @@ class CrossCikResolution:
     reason: str
     target_accession: str | None = None
     target_document_url: str | None = None
+    source_depth: int | None = None
+    target_depth: int | None = None
 
 
 @dataclass(frozen=True)
@@ -381,6 +383,34 @@ def extract_explicit_legal_entity_evidence(
     )
 
 
+def _resolution(
+    resolution_id: str,
+    reference: CrossCikReference,
+    source_node_id: str,
+    source_cik: str,
+    status: str,
+    reason: str,
+    *,
+    depth: int,
+    target_accession: str | None = None,
+    target_document_url: str | None = None,
+    target_depth: int | None = None,
+) -> CrossCikResolution:
+    return CrossCikResolution(
+        resolution_id=resolution_id,
+        reference_id=reference.reference_id,
+        source_node_id=source_node_id,
+        source_cik=source_cik,
+        target_cik=reference.target_cik,
+        status=status,
+        reason=reason,
+        target_accession=target_accession,
+        target_document_url=target_document_url,
+        source_depth=depth,
+        target_depth=target_depth,
+    )
+
+
 def resolve_cross_cik_graph(
     client: SecClient,
     *,
@@ -451,13 +481,12 @@ def resolve_cross_cik_graph(
             resolution_id = f"xcik-resolution:{len(resolutions) + 1}"
 
             if reference.cited_filing_date and reference.cited_filing_date > analysis_date:
-                resolutions.append(
-                    CrossCikResolution(
-                        resolution_id, reference.reference_id, source_node_id, source_cik, reference.target_cik,
-                        "blocked_cutoff", "cited filing date is after analysis cutoff",
-                        reference.cited_accession, None,
-                    )
-                )
+                resolutions.append(_resolution(
+                    resolution_id, reference, source_node_id, source_cik,
+                    "blocked_cutoff", "cited filing date is after analysis cutoff",
+                    depth=depth,
+                    target_accession=reference.cited_accession,
+                ))
                 continue
 
             filings = filing_cache.get(reference.target_cik)
@@ -467,33 +496,32 @@ def resolve_cross_cik_graph(
                     filings = tuple(item for item in filings if item.filing_date <= analysis_date)
                     filing_cache[reference.target_cik] = filings
                 except Exception as exc:
-                    resolutions.append(
-                        CrossCikResolution(
-                            resolution_id, reference.reference_id, source_node_id, source_cik, reference.target_cik,
-                            "target_cik_unavailable", f"failed target CIK filing lookup: {exc}",
-                            reference.cited_accession, None,
-                        )
-                    )
+                    resolutions.append(_resolution(
+                        resolution_id, reference, source_node_id, source_cik,
+                        "target_cik_unavailable", f"failed target CIK filing lookup: {exc}",
+                        depth=depth,
+                        target_accession=reference.cited_accession,
+                    ))
                     continue
 
             base_reference = _source_reference(reference)
             target_filing, filing_reason = _match_target_filing(base_reference, filings)
             if target_filing is None:
-                resolutions.append(
-                    CrossCikResolution(
-                        resolution_id, reference.reference_id, source_node_id, source_cik, reference.target_cik,
-                        "unresolved", filing_reason, reference.cited_accession, None,
-                    )
-                )
+                resolutions.append(_resolution(
+                    resolution_id, reference, source_node_id, source_cik,
+                    "unresolved", filing_reason,
+                    depth=depth,
+                    target_accession=reference.cited_accession,
+                ))
                 continue
             if target_filing.filing_date > source_date:
-                resolutions.append(
-                    CrossCikResolution(
-                        resolution_id, reference.reference_id, source_node_id, source_cik, reference.target_cik,
-                        "blocked_temporal", "target filing post-dates the referencing source document",
-                        target_filing.accession_number, None,
-                    )
-                )
+                resolutions.append(_resolution(
+                    resolution_id, reference, source_node_id, source_cik,
+                    "blocked_temporal", "target filing post-dates the referencing source document",
+                    depth=depth,
+                    target_accession=target_filing.accession_number,
+                    target_depth=depth + 1,
+                ))
                 continue
 
             cache_key = (reference.target_cik, target_filing.accession_number)
@@ -504,47 +532,48 @@ def resolve_cross_cik_graph(
                     documents = parse_filing_documents(index_html, target_filing)
                     index_cache[cache_key] = documents
                 except Exception as exc:
-                    resolutions.append(
-                        CrossCikResolution(
-                            resolution_id, reference.reference_id, source_node_id, source_cik, reference.target_cik,
-                            "filing_resolved_document_unavailable", f"target filing index fetch failed: {exc}",
-                            target_filing.accession_number, None,
-                        )
-                    )
+                    resolutions.append(_resolution(
+                        resolution_id, reference, source_node_id, source_cik,
+                        "filing_resolved_document_unavailable", f"target filing index fetch failed: {exc}",
+                        depth=depth,
+                        target_accession=target_filing.accession_number,
+                        target_depth=depth + 1,
+                    ))
                     continue
 
             target_document, document_reason = _match_target_document(base_reference, documents)
             if target_document is None:
-                resolutions.append(
-                    CrossCikResolution(
-                        resolution_id, reference.reference_id, source_node_id, source_cik, reference.target_cik,
-                        "filing_resolved", document_reason, target_filing.accession_number, None,
-                    )
-                )
+                resolutions.append(_resolution(
+                    resolution_id, reference, source_node_id, source_cik,
+                    "filing_resolved", document_reason,
+                    depth=depth,
+                    target_accession=target_filing.accession_number,
+                    target_depth=depth + 1,
+                ))
                 continue
 
+            target_depth = depth + 1
             resolved_documents[target_document.url] = target_document
-            resolutions.append(
-                CrossCikResolution(
-                    resolution_id, reference.reference_id, source_node_id, source_cik, reference.target_cik,
-                    "resolved_cross_cik", f"explicit target CIK; {filing_reason}; {document_reason}",
-                    target_filing.accession_number, target_document.url,
-                )
-            )
+            resolutions.append(_resolution(
+                resolution_id, reference, source_node_id, source_cik,
+                "resolved_cross_cik", f"explicit target CIK; {filing_reason}; {document_reason}",
+                depth=depth,
+                target_accession=target_filing.accession_number,
+                target_document_url=target_document.url,
+                target_depth=target_depth,
+            ))
 
             target_node_id = f"cross-cik:{reference.target_cik}:{target_filing.accession_number}:{target_document.document}"
-            queue.append(
-                (
-                    target_node_id,
-                    reference.target_cik,
-                    target_filing.accession_number,
-                    target_filing.filing_date,
-                    target_document.url,
-                    depth + 1,
-                )
-            )
+            queue.append((
+                target_node_id,
+                reference.target_cik,
+                target_filing.accession_number,
+                target_filing.filing_date,
+                target_document.url,
+                target_depth,
+            ))
 
-            remaining_depth = max_depth - (depth + 1)
+            remaining_depth = max_depth - target_depth
             if remaining_depth > 0:
                 try:
                     subgraph = resolve_source_document_graph(
@@ -559,7 +588,8 @@ def resolve_cross_cik_graph(
                     for document in subgraph.resolved_documents:
                         resolved_documents[document.url] = document
                     for node in subgraph.nodes:
-                        queue.append(_source_scan_tuple(node, reference.target_cik))
+                        global_node = replace(node, depth=target_depth + node.depth)
+                        queue.append(_source_scan_tuple(global_node, reference.target_cik))
                     warnings.extend(subgraph.warnings)
                 except Exception as exc:
                     warnings.append(f"failed same-CIK resolution inside foreign CIK {reference.target_cik}: {exc}")
