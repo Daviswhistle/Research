@@ -197,6 +197,68 @@ def test_cross_cik_resolver_preserves_preexisting_source_depth():
     assert resolved[0].target_depth == 3
 
 
+def test_nested_same_cik_reference_keeps_global_depth_before_next_foreign_hop():
+    root = filing("1111111111", "0001111111-22-000001", date(2022, 11, 1), "10-Q", "parent.htm")
+    foreign_a = filing("2222222222", "2222222222-22-000010", date(2022, 5, 15), "8-K", "entry8k.htm")
+    old_a = filing("2222222222", "2222222222-19-000003", date(2019, 5, 10), "8-K", "old8k.htm")
+    foreign_b = filing("3333333333", "3333333333-19-000004", date(2019, 4, 30), "8-K", "third8k.htm")
+
+    a_base = filing_index_url(foreign_a).rsplit("/", 1)[0]
+    a_entry = a_base + "/ex10-entry.htm"
+    old_a_base = filing_index_url(old_a).rsplit("/", 1)[0]
+    old_a_exhibit = old_a_base + "/ex10-1.htm"
+    b_base = filing_index_url(foreign_b).rsplit("/", 1)[0]
+    b_exhibit = b_base + "/ex10-b.htm"
+
+    root_html = (
+        '<a href="https://www.sec.gov/Archives/edgar/data/2222222222/'
+        '222222222222000010/ex10-entry.htm">foreign A entry</a>'
+    )
+    a_entry_html = (
+        "See Exhibit 10.1 to Form 8-K filed on 5/10/2019, accession 2222222222-19-000003."
+    )
+    old_a_html = (
+        '<a href="https://www.sec.gov/Archives/edgar/data/3333333333/'
+        '333333333319000004/ex10-b.htm">foreign B entry</a>'
+    )
+    mapping = {
+        root.archive_url: root_html,
+        filing_index_url(foreign_a): index_html("entry8k.htm", "ex10-entry.htm"),
+        a_entry: a_entry_html,
+        filing_index_url(old_a): index_html("old8k.htm", "ex10-1.htm"),
+        old_a.archive_url: "<html><body>No references.</body></html>",
+        old_a_exhibit: old_a_html,
+        filing_index_url(foreign_b): index_html("third8k.htm", "ex10-b.htm"),
+        b_exhibit: "<html><body>No further references.</body></html>",
+    }
+    client = FakeClient(
+        {
+            "2222222222": (foreign_a, old_a),
+            "3333333333": (foreign_b,),
+        },
+        mapping,
+    )
+    graph = resolve_cross_cik_graph(
+        client,
+        root_cik=root.cik,
+        analysis_date=date(2022, 12, 31),
+        source_nodes=(root_node(root),),
+        max_depth=4,
+    )
+    a_resolution = next(
+        item for item in graph.resolutions
+        if item.status == "resolved_cross_cik" and item.target_cik == "2222222222"
+    )
+    b_resolution = next(
+        item for item in graph.resolutions
+        if item.status == "resolved_cross_cik" and item.target_cik == "3333333333"
+    )
+    assert a_resolution.source_depth == 0
+    assert a_resolution.target_depth == 1
+    assert b_resolution.source_depth == 2
+    assert b_resolution.target_depth == 3
+
+
 def test_cross_cik_resolver_blocks_foreign_target_that_postdates_source():
     source = filing("1111111111", "0001111111-21-000001", date(2021, 1, 1), "10-Q", "parent.htm")
     future = filing("2222222222", "0002222222-22-000010", date(2022, 5, 15), "8-K", "future8k.htm")
