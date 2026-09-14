@@ -70,7 +70,7 @@ def index_html(primary, exhibit):
     """
 
 
-def root_node(source):
+def root_node(source, *, depth=0):
     return SourceGraphNode(
         node_id=f"filing:{source.accession_number}:primary",
         node_type="filing_primary",
@@ -80,7 +80,7 @@ def root_node(source):
         url=source.archive_url,
         document_type=source.form,
         description="primary filing document",
-        depth=0,
+        depth=depth,
     )
 
 
@@ -163,8 +163,38 @@ def test_cross_cik_resolver_follows_explicit_foreign_archives_link_and_expands_p
     resolved = [item for item in expanded.cross_cik_graph.resolutions if item.status == "resolved_cross_cik"]
     assert len(resolved) == 1
     assert resolved[0].target_cik == "2222222222"
+    assert resolved[0].source_depth == 0
+    assert resolved[0].target_depth == 1
     assert any(document.url == exhibit_url for document in expanded.cross_cik_graph.resolved_documents)
     assert any(candidate.snapshot_template.get("commitment") == 700_000_000 for candidate in expanded.packet.candidates)
+
+
+def test_cross_cik_resolver_preserves_preexisting_source_depth():
+    source = filing("1111111111", "0001111111-22-000001", date(2022, 11, 1), "10-Q", "parent.htm")
+    foreign = filing("2222222222", "0002222222-20-000010", date(2020, 5, 15), "8-K", "borrower8k.htm")
+    base = filing_index_url(foreign).rsplit("/", 1)[0]
+    exhibit_url = base + "/ex10-1.htm"
+    source_html = (
+        '<a href="https://www.sec.gov/Archives/edgar/data/2222222222/'
+        '000222222220000010/ex10-1.htm">foreign agreement</a>'
+    )
+    mapping = {
+        source.archive_url: source_html,
+        filing_index_url(foreign): index_html("borrower8k.htm", "ex10-1.htm"),
+        exhibit_url: "<html><body>No further references.</body></html>",
+    }
+    client = FakeClient({"2222222222": (foreign,)}, mapping)
+    graph = resolve_cross_cik_graph(
+        client,
+        root_cik=source.cik,
+        analysis_date=date(2022, 12, 31),
+        source_nodes=(root_node(source, depth=2),),
+        max_depth=4,
+    )
+    resolved = [item for item in graph.resolutions if item.status == "resolved_cross_cik"]
+    assert len(resolved) == 1
+    assert resolved[0].source_depth == 2
+    assert resolved[0].target_depth == 3
 
 
 def test_cross_cik_resolver_blocks_foreign_target_that_postdates_source():
@@ -184,7 +214,10 @@ def test_cross_cik_resolver_blocks_foreign_target_that_postdates_source():
         analysis_date=date(2023, 1, 1),
         source_nodes=(root_node(source),),
     )
-    assert any(item.status == "blocked_temporal" for item in graph.resolutions)
+    blocked = [item for item in graph.resolutions if item.status == "blocked_temporal"]
+    assert len(blocked) == 1
+    assert blocked[0].source_depth == 0
+    assert blocked[0].target_depth == 1
 
 
 def test_explicit_cik_role_and_subsidiary_relation_are_preserved_as_source_evidence():
