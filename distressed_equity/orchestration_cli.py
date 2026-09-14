@@ -25,6 +25,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--user-agent", help="SEC User-Agent; defaults to SEC_USER_AGENT")
     parser.add_argument("--filing-limit", type=int, default=3)
     parser.add_argument("--max-snippets-per-filing", type=int, default=50)
+    parser.add_argument("--instrument-filing-limit", type=int, default=6)
+    parser.add_argument("--max-instrument-exhibits-per-filing", type=int, default=6)
+    parser.add_argument("--max-instrument-candidates-per-exhibit", type=int, default=20)
     parser.add_argument("--market-provider", choices=("none", "alpha-vantage"), default="none")
     parser.add_argument("--alpha-vantage-key", help="Defaults to ALPHA_VANTAGE_API_KEY")
     parser.add_argument("--history-years", type=int, default=5)
@@ -85,6 +88,23 @@ def _bundle_from_frozen_packet(packet: dict[str, Any], cutoff: date) -> Research
     )
 
 
+def _write_bundle_artifacts(workspace: Path, bundle: ResearchBundle) -> None:
+    packet = bundle.packet
+    _write_json(workspace / "research_packet.json", packet)
+    _write_json(workspace / "capital_stack.json", packet["capital_stack_packet"])
+    _write_json(workspace / "capital_stack_diff.json", packet["capital_stack_diff"])
+    _write_json(workspace / "tasks.json", {"tasks": packet["agent_tasks"]})
+    source_packet = packet.get("debt_instrument_source_packet")
+    if source_packet is not None:
+        _write_json(workspace / "debt_instrument_sources.json", source_packet)
+    verification = packet.get("debt_instrument_verification")
+    if isinstance(verification, dict):
+        _write_json(workspace / "debt_instrument_task.json", verification.get("task", {}))
+        _write_json(workspace / "debt_instrument_template.json", verification.get("result_template", {}))
+    if packet.get("market_snapshot") is not None:
+        _write_json(workspace / "market_snapshot.json", packet["market_snapshot"])
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cutoff = date.fromisoformat(args.analysis_date)
@@ -109,16 +129,13 @@ def main(argv: list[str] | None = None) -> int:
             cik=args.cik,
             filing_limit=args.filing_limit,
             max_snippets_per_filing=args.max_snippets_per_filing,
+            instrument_filing_limit=args.instrument_filing_limit,
+            max_instrument_exhibits_per_filing=args.max_instrument_exhibits_per_filing,
+            max_instrument_candidates_per_exhibit=args.max_instrument_candidates_per_exhibit,
             market_provider=market_provider,
             history_years=args.history_years,
         )
-
-        _write_json(packet_path, bundle.packet)
-        _write_json(workspace / "capital_stack.json", bundle.packet["capital_stack_packet"])
-        _write_json(workspace / "capital_stack_diff.json", bundle.packet["capital_stack_diff"])
-        _write_json(workspace / "tasks.json", {"tasks": bundle.packet["agent_tasks"]})
-        if bundle.packet.get("market_snapshot") is not None:
-            _write_json(workspace / "market_snapshot.json", bundle.packet["market_snapshot"])
+        _write_bundle_artifacts(workspace, bundle)
 
     debt_ledger_payload = None
     if args.debt_instruments:
