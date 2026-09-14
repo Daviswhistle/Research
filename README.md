@@ -110,10 +110,11 @@ export SEC_USER_AGENT="Research your-email@example.com"
 distressed-equity-sec \
   --ticker CVNA \
   --analysis-date 2022-12-31 \
-  -o output/cvna_2022-12-31_sec.json
+  -o output/cvna_2022-12-31_sec.json \
+  --tasks-output output/cvna_2022-12-31_tasks.json
 ```
 
-스냅샷에는 분석일 이전 10-K/10-Q/8-K 목록, SEC archive 링크, 그리고 표준 XBRL에서 찾은 revenue, operating income, cash, CFO, capex, debt, shares가 source/date/period와 함께 저장됩니다. 분석일 뒤 제출된 행은 제외합니다.
+스냅샷에는 분석일 이전 10-K/10-Q/8-K 목록, SEC archive 링크, 표준 XBRL fact, 안전하게 채울 수 있는 screening draft, agent task와 task별 structured result template이 함께 저장됩니다.
 
 주의할 점:
 
@@ -121,6 +122,35 @@ distressed-equity-sec \
 - revenue/CFO/capex 같은 duration fact는 보고된 원기간 그대로이며 자동으로 분기 정상화하지 않습니다.
 - SEC ticker/CIK 매핑은 검색 편의를 위한 자료이므로 CIK와 회사명을 결과에 함께 남깁니다.
 - 자동접근은 SEC fair-access 정책을 지켜야 하므로 클라이언트는 식별 가능한 User-Agent를 요구하고 10 req/s보다 느리게 제한합니다.
+
+### SEC debt / covenant evidence
+
+표준 XBRL debt 숫자만으로 survival을 판단하지 않습니다. Primary filing의 debt note에서 maturity, revolver, covenant, springing maturity, collateral, interest 관련 문맥을 좁혀 agent audit packet을 만듭니다.
+
+```bash
+distressed-equity-sec-debt \
+  --ticker CVNA \
+  --analysis-date 2022-12-31 \
+  --filing-limit 3 \
+  -o output/cvna_capital_stack_packet.json \
+  --task-output output/cvna_capital_stack_task.json
+```
+
+정규식으로 찾은 금액·연도·금리는 **후보**일 뿐 자동 debt schedule로 승격하지 않습니다. Instrument와 조건을 source filing에서 다시 확인한 뒤 structured agent result로 제출해야 합니다.
+
+### Structured agent result ingestion
+
+에이전트 결과를 자유 텍스트 그대로 모델에 넣지 않습니다. 모든 patch는 task별 whitelist, evidence ID, point-in-time cutoff, value validation, conflict detection을 통과해야 합니다.
+
+```bash
+distressed-equity-ingest output/cvna_2022-12-31_sec.json \
+  --result output/capital_stack_result.json \
+  --result output/market_result.json \
+  --result output/normalization_result.json \
+  -o output/cvna_merged.json
+```
+
+Low-confidence patch는 기본적으로 evidence만 남기고 값을 바꾸지 않습니다. 이미 채워진 non-null 값과 다른 제안도 기본적으로 overwrite하지 않습니다. 필수 deterministic field가 모두 채워지면 같은 실행에서 screener까지 자동 실행합니다.
 
 ### Survivorship-aware historical market replay
 
@@ -170,6 +200,8 @@ distressed-equity-base-rates cases.jsonl \
 
 - [`docs/DISTRESSED_EQUITY.md`](docs/DISTRESSED_EQUITY.md)
 - [`docs/SEC_EVIDENCE.md`](docs/SEC_EVIDENCE.md)
+- [`docs/SEC_CAPITAL_STACK.md`](docs/SEC_CAPITAL_STACK.md)
+- [`docs/AGENT_INGESTION.md`](docs/AGENT_INGESTION.md)
 - [`docs/MARKET_REPLAY.md`](docs/MARKET_REPLAY.md)
 
 ### 테스트
