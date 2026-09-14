@@ -25,6 +25,7 @@ class ForeignContractGraph:
     cross_cik_hops: int
     local_depth_budget: int
     graph: SourceDocumentGraph
+    entry_global_depth: int | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,24 @@ def _resolved_cik_hops(cross_expanded: CrossCikExpandedPacket) -> dict[str, int]
                 hops[item.target_cik] = candidate
                 changed = True
     return hops
+
+
+def _entry_depths(cross_expanded: CrossCikExpandedPacket) -> dict[tuple[str, str], int]:
+    """Return the shallowest exact global depth for each resolved foreign entry."""
+
+    output: dict[tuple[str, str], int] = {}
+    for item in cross_expanded.cross_cik_graph.resolutions:
+        if (
+            item.status != "resolved_cross_cik"
+            or not item.target_document_url
+            or item.target_depth is None
+        ):
+            continue
+        key = (item.target_cik, item.target_document_url)
+        previous = output.get(key)
+        if previous is None or item.target_depth < previous:
+            output[key] = item.target_depth
+    return output
 
 
 def _alias_groups_for_cik(
@@ -82,6 +101,11 @@ def expand_foreign_contract_identities(
     that foreign CIK's point-in-time filing universe. Legal-name aliases are also
     selected by exact CIK, so root-company aliases cannot leak into a foreign
     borrower's contract identity.
+
+    Production cross-CIK resolutions carry exact global depth provenance. The
+    fallback uses the shallowest exact target depth for each entry. CIK-hop count
+    is retained only as informational metadata and as a compatibility fallback for
+    legacy/hand-built graphs without depth provenance.
     """
 
     if max_depth < 0:
@@ -94,6 +118,7 @@ def expand_foreign_contract_identities(
     legal_name_graphs = tuple(legal_name_graphs)
     documents_by_url = {item.url: item for item in graph.resolved_documents}
     hops = _resolved_cik_hops(cross_expanded)
+    exact_depths = _entry_depths(cross_expanded)
     warnings: list[str] = []
     outputs: list[ForeignContractGraph] = []
     seen_entries: set[tuple[str, str]] = set()
@@ -120,10 +145,16 @@ def expand_foreign_contract_identities(
             continue
 
         cross_hops = hops.get(resolution.target_cik, 1)
-        local_depth = max_depth - cross_hops
+        entry_depth = exact_depths.get(entry_key)
+        if entry_depth is None:
+            entry_depth = cross_hops
+            warnings.append(
+                f"foreign contract fallback used legacy CIK-hop depth proxy for {entry.url}; exact target depth unavailable"
+            )
+        local_depth = max_depth - entry_depth
         if local_depth <= 0:
             warnings.append(
-                f"foreign contract fallback skipped {entry.url}: cross-CIK hops={cross_hops} exhaust max_depth={max_depth}"
+                f"foreign contract fallback skipped {entry.url}: target depth={entry_depth} exhausts max_depth={max_depth}"
             )
             continue
 
@@ -173,6 +204,7 @@ def expand_foreign_contract_identities(
                 cross_cik_hops=cross_hops,
                 local_depth_budget=local_depth,
                 graph=expanded.graph,
+                entry_global_depth=entry_depth,
             )
         )
 
@@ -222,7 +254,7 @@ def expand_foreign_contract_identities(
     max_candidates_per_exhibit: int = 20,
     max_iterations: int = 8,
 ) -> ForeignContractExpansion:
-    """Run the legacy foreign pass, then close newly exposed cross-CIK links."""
+    """Run the exact-depth foreign pass, then close newly exposed cross-CIK links."""
 
     from .foreign_contract_closure import expand_foreign_contract_closure
 
