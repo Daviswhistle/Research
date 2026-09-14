@@ -5,6 +5,8 @@ from distressed_equity.agent_results import (
     ingest_agent_results,
     validate_agent_result,
 )
+from distressed_equity.io import screening_candidate_from_dict
+from distressed_equity.screening import screen_candidate
 
 
 def packet():
@@ -197,6 +199,11 @@ def test_valid_results_can_close_required_screening_fields():
     assert report.ready_for_screening is True
     assert report.screening_candidate_draft["capital_structure"]["current_price"] == 2.0
     assert report.screening_candidate_draft["base_scenario"]["enterprise_value"] == 900.0
+
+    candidate = screening_candidate_from_dict(report.screening_candidate_draft)
+    screened = screen_candidate(candidate)
+    assert screened.base_equity_multiple == 4.0
+    assert screened.priority in {"RESEARCH", "DROP", "DEEP_DIVE_CANDIDATE"}
 
 
 def test_patch_requires_evidence_reference():
