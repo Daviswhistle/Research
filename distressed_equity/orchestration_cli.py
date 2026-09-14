@@ -31,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-instrument-candidates-per-exhibit", type=int, default=20)
     parser.add_argument("--reference-depth", type=int, default=3)
     parser.add_argument("--reference-max-nodes", type=int, default=80)
+    parser.add_argument("--cross-cik-max-nodes", type=int, default=80)
     parser.add_argument("--contract-search-max-filings", type=int, default=40)
     parser.add_argument("--contract-days-before-execution", type=int, default=30)
     parser.add_argument("--contract-days-after-execution", type=int, default=550)
@@ -43,6 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-contract-identity-fallback",
         action="store_true",
         help="Do not reverse-search locator-less contract title + execution-date references",
+    )
+    parser.add_argument(
+        "--no-cross-cik",
+        action="store_true",
+        help="Do not follow explicit foreign-CIK SEC Archives/CIK references",
     )
     parser.add_argument("--market-provider", choices=("none", "alpha-vantage"), default="none")
     parser.add_argument("--alpha-vantage-key", help="Defaults to ALPHA_VANTAGE_API_KEY")
@@ -116,6 +122,9 @@ def _write_bundle_artifacts(workspace: Path, bundle: ResearchBundle) -> None:
     graph = packet.get("source_document_graph")
     if graph is not None:
         _write_json(workspace / "source_document_graph.json", graph)
+    cross_graph = packet.get("cross_cik_graph")
+    if cross_graph is not None:
+        _write_json(workspace / "cross_cik_graph.json", cross_graph)
     verification = packet.get("debt_instrument_verification")
     if isinstance(verification, dict):
         _write_json(workspace / "debt_instrument_task.json", verification.get("task", {}))
@@ -153,8 +162,10 @@ def main(argv: list[str] | None = None) -> int:
             max_instrument_candidates_per_exhibit=args.max_instrument_candidates_per_exhibit,
             resolve_incorporated_references=not args.no_resolve_references,
             resolve_contract_identity_references=not args.no_contract_identity_fallback,
+            resolve_cross_cik_references=not args.no_cross_cik,
             reference_depth=args.reference_depth,
             reference_max_nodes=args.reference_max_nodes,
+            cross_cik_max_nodes=args.cross_cik_max_nodes,
             contract_search_max_filings=args.contract_search_max_filings,
             contract_days_before_execution=args.contract_days_before_execution,
             contract_days_after_execution=args.contract_days_after_execution,
