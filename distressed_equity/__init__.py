@@ -18,6 +18,13 @@ from .contract_identity import (
     extract_contract_identities,
     reverse_search_contract_identity,
 )
+from .contract_parties import (
+    ContractParty,
+    contract_parties_compatible,
+    extract_contract_parties,
+    normalize_party_name,
+    party_fingerprint,
+)
 from .covenant_sensitivity import (
     CovenantSensitivityCase,
     CovenantSensitivityReport,
@@ -85,7 +92,9 @@ __all__ = [
     "CapitalStackDiffReport",
     "case_from_dict",
     "ContractIdentity",
+    "ContractParty",
     "ContractSearchResult",
+    "contract_parties_compatible",
     "CovenantDefinition",
     "CovenantEbitdaBridge",
     "CovenantHeadroomResult",
@@ -104,6 +113,7 @@ __all__ = [
     "ExpandedInstrumentPacket",
     "expand_instrument_packet_with_references",
     "extract_contract_identities",
+    "extract_contract_parties",
     "extract_source_references",
     "FilingDocument",
     "ingest_agent_results",
@@ -116,6 +126,8 @@ __all__ = [
     "load_screening_universe",
     "MarketDistressSeed",
     "MarketSnapshot",
+    "normalize_party_name",
+    "party_fingerprint",
     "PatchProposal",
     "PricePoint",
     "required_probability",
