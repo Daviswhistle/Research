@@ -34,6 +34,13 @@ class FakeSecClient:
     def _throttle(self):
         return None
 
+    def submissions(self, cik):
+        key = str(cik).zfill(10)
+        return {
+            "name": "Parent Co" if key == self.root.cik else "Borrower Co",
+            "formerNames": [],
+        }
+
     def snapshot(self, **kwargs):
         cutoff = kwargs["analysis_date"]
         return SecPointInTimeSnapshot(
@@ -108,6 +115,7 @@ def test_research_bundle_freezes_cross_cik_graph_and_foreign_debt_source():
         resolve_contract_identity_references=False,
     )
     packet = bundle.packet
+    assert packet["legal_name_alias_graph"]["canonical_name_as_of"] == "Parent Co"
     graph = packet["cross_cik_graph"]
     assert graph is not None
     assert any(item["status"] == "resolved_cross_cik" for item in graph["resolutions"])
@@ -119,3 +127,4 @@ def test_research_bundle_freezes_cross_cik_graph_and_foreign_debt_source():
     summary = render_research_summary(bundle)
     assert "Cross-CIK SEC resolutions" in summary
     assert "Explicit legal-entity graph" in summary
+    assert "Canonical legal name at cutoff" in summary
