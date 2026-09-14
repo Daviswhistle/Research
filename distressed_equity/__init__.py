@@ -11,6 +11,13 @@ from .agent_results import (
 )
 from .base_rates import BaseRateCase, BaseRateLibrary, BaseRateSummary
 from .capital_stack_diff import CapitalStackDiffReport, diff_capital_stack_packet
+from .contract_graph import enhance_expanded_packet_with_contract_identity
+from .contract_identity import (
+    ContractIdentity,
+    ContractSearchResult,
+    extract_contract_identities,
+    reverse_search_contract_identity,
+)
 from .covenant_sensitivity import (
     CovenantSensitivityCase,
     CovenantSensitivityReport,
@@ -77,6 +84,8 @@ __all__ = [
     "calculate_covenant_headroom",
     "CapitalStackDiffReport",
     "case_from_dict",
+    "ContractIdentity",
+    "ContractSearchResult",
     "CovenantDefinition",
     "CovenantEbitdaBridge",
     "CovenantHeadroomResult",
@@ -91,8 +100,10 @@ __all__ = [
     "debt_snapshots_from_dict",
     "diff_capital_stack_packet",
     "DistressScanConfig",
+    "enhance_expanded_packet_with_contract_identity",
     "ExpandedInstrumentPacket",
     "expand_instrument_packet_with_references",
+    "extract_contract_identities",
     "extract_source_references",
     "FilingDocument",
     "ingest_agent_results",
@@ -110,6 +121,7 @@ __all__ = [
     "required_probability",
     "ResearchBundle",
     "resolve_source_document_graph",
+    "reverse_search_contract_identity",
     "run_historical_replay",
     "screen_candidate",
     "screen_universe",
