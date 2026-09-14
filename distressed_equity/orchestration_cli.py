@@ -9,6 +9,7 @@ from typing import Any
 
 from .alpha_vantage import AlphaVantageProvider
 from .debt_instruments import build_debt_instrument_ledger, debt_instrument_ledger_to_dict, debt_snapshots_from_dict
+from .instrument_verification import validate_debt_snapshots_against_source_packet
 from .orchestration import ResearchBundle, build_research_bundle, ingest_research_bundle, render_research_summary
 from .sec import SecClient
 
@@ -44,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--debt-instruments",
-        help="Optional JSON containing filing-level debt instrument snapshots for stable-ID matching",
+        help="Optional JSON containing verified filing-level debt instrument snapshots for stable-ID matching",
     )
     parser.add_argument("--allow-overwrite", action="store_true")
     parser.add_argument("--apply-low-confidence", action="store_true")
@@ -138,8 +139,18 @@ def main(argv: list[str] | None = None) -> int:
         _write_bundle_artifacts(workspace, bundle)
 
     debt_ledger_payload = None
+    debt_source_validation_warnings: tuple[str, ...] = ()
     if args.debt_instruments:
-        snapshots = debt_snapshots_from_dict(_load_json_any(args.debt_instruments))
+        raw_debt = _load_json_any(args.debt_instruments)
+        source_packet = bundle.packet.get("debt_instrument_source_packet")
+        if isinstance(source_packet, dict):
+            source_validation = validate_debt_snapshots_against_source_packet(source_packet, raw_debt)
+            if not source_validation.valid:
+                raise ValueError("invalid source-backed debt snapshots: " + "; ".join(source_validation.errors))
+            snapshots = source_validation.snapshots
+            debt_source_validation_warnings = source_validation.warnings
+        else:
+            snapshots = debt_snapshots_from_dict(raw_debt)
         ledger = build_debt_instrument_ledger(snapshots)
         debt_ledger_payload = debt_instrument_ledger_to_dict(ledger)
         _write_json(workspace / "debt_instrument_ledger.json", debt_ledger_payload)
@@ -165,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
             f"- Amendment/change candidates: {len(debt_ledger_payload['changes'])}\n"
             f"- New/unmatched stable IDs: {len(debt_ledger_payload['unmatched_versions'])}\n"
         )
+        if debt_source_validation_warnings:
+            summary += "- Source validation warnings: " + "; ".join(debt_source_validation_warnings) + "\n"
     (workspace / "summary.md").write_text(summary, encoding="utf-8")
 
     print(workspace / "summary.md")
