@@ -230,6 +230,8 @@ Legal-name graph는 현재 SEC `submissions` metadata와 cutoff 이전 filing의
 
 Cross-CIK 탐색은 SEC Archives URL, 명시 CIK, exact accession처럼 **source가 target CIK를 직접 증명하는 경우만** explicit traversal로 취급합니다. 회사명만 있는 외부 borrower/issuer/guarantor는 별도 `named_entity_contract_graph.json`에 candidate/confirmation provenance를 보존합니다. 이 fallback은 SEC `company_tickers.json`뿐 아니라 공식 누적 CIK/name 파일 `Archives/edgar/cik-lookup-data.txt`도 **candidate generation에만** 사용하므로 ticker가 없는 finance subsidiary나 historical filer도 후보가 될 수 있습니다. 실제 CIK resolution은 source-date SEC legal-name 확인과 unique historical contract exhibit 확인이 모두 성공할 때만 허용하며, name-origin 결과를 `resolved_cross_cik`로 가장하지 않습니다. 자세한 규칙은 [`docs/NAMED_ENTITY_CONTRACT_RESOLUTION.md`](docs/NAMED_ENTITY_CONTRACT_RESOLUTION.md)를 참고하세요.
 
+현재 named-entity resolver가 유일하게 확인한 새 exhibit는 debt source packet에는 들어가지만, 그 새 exhibit가 또 다른 명시적 SEC locator를 포함할 때 자동 cross-CIK closure를 다시 시작하지는 않습니다. 이 재-closure가 다음 source-graph 확장 단계입니다.
+
 Agent가 filing별 debt instrument snapshot을 구조화했다면 같은 workspace에서 stable ledger를 함께 만들 수 있습니다.
 
 ```bash
