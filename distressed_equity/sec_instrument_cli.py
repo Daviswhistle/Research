@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date
 import json
 from pathlib import Path
@@ -18,6 +18,10 @@ from .legal_name_alias import (
     build_legal_name_alias_graph,
     build_legal_name_alias_graphs,
     legal_name_alias_graph_to_dict,
+)
+from .named_entity_contracts import (
+    named_entity_contract_graph_to_dict,
+    resolve_named_entity_contracts,
 )
 from .sec import SecClient
 from .sec_instruments import (
@@ -58,17 +62,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-contract-identity-fallback",
         action="store_true",
-        help="Do not reverse-search locator-less contract title + execution-date references, including inside explicit foreign CIKs",
+        help="Do not reverse-search locator-less contract references, including foreign and named-entity fallbacks",
     )
     parser.add_argument(
         "--no-cross-cik",
         action="store_true",
-        help="Do not follow explicit foreign-CIK SEC Archives/CIK references",
+        help="Do not leave the root CIK through explicit or source-confirmed external-entity resolution",
     )
     parser.add_argument("--output", "-o", help="Expanded source packet JSON path; stdout when omitted")
     parser.add_argument("--legal-name-output", help="Optional point-in-time SEC legal-name alias graph JSON path")
     parser.add_argument("--graph-output", help="Optional same-CIK source-document graph JSON path")
     parser.add_argument("--cross-cik-output", help="Optional cross-CIK legal-entity/source/foreign-contract graph JSON path")
+    parser.add_argument("--named-entity-output", help="Optional source-confirmed named-entity contract graph JSON path")
     parser.add_argument("--task-output", help="Optional verification task JSON path")
     parser.add_argument("--template-output", help="Optional ledger-ready verification template JSON path")
     return parser
@@ -94,6 +99,31 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _jsonable(item) for key, item in value.items()}
     return value
+
+
+def _named_source_nodes(root_nodes, foreign_graphs, max_depth: int):
+    chosen = {}
+    for node in root_nodes:
+        if node.depth >= max_depth:
+            continue
+        key = (node.accession_number, node.url)
+        old = chosen.get(key)
+        if old is None or node.depth < old.depth:
+            chosen[key] = node
+    for item in foreign_graphs:
+        entry_depth = getattr(item, "entry_global_depth", None)
+        if entry_depth is None:
+            continue
+        for node in item.graph.nodes:
+            global_depth = entry_depth + node.depth
+            if global_depth >= max_depth:
+                continue
+            adjusted = replace(node, depth=global_depth)
+            key = (adjusted.accession_number, adjusted.url)
+            old = chosen.get(key)
+            if old is None or adjusted.depth < old.depth:
+                chosen[key] = adjusted
+    return tuple(sorted(chosen.values(), key=lambda item: (item.depth, item.node_id)))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -126,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
 
     graph_payload = None
     cross_cik_payload = None
+    named_entity_payload = None
     if not args.no_resolve_references:
         expanded = expand_instrument_packet_with_references(
             client,
@@ -196,6 +227,25 @@ def main(argv: list[str] | None = None) -> int:
                 foreign_payload = foreign_contract_expansion_to_dict(foreign_expansion)
                 cross_cik_payload["foreign_contract_graphs"] = foreign_payload["graphs"]
                 cross_cik_payload["foreign_contract_warnings"] = foreign_payload["warnings"]
+
+                named_expansion = resolve_named_entity_contracts(
+                    client,
+                    packet=packet,
+                    source_nodes=_named_source_nodes(
+                        expanded.graph.nodes,
+                        foreign_expansion.graphs,
+                        args.reference_depth,
+                    ),
+                    root_cik=snapshot.cik,
+                    known_legal_name_graphs=legal_graphs,
+                    max_contract_search_filings=args.contract_search_max_filings,
+                    contract_days_before_execution=args.contract_days_before_execution,
+                    contract_days_after_execution=args.contract_days_after_execution,
+                    max_candidates_per_exhibit=args.max_candidates_per_exhibit,
+                )
+                packet = named_expansion.packet
+                named_entity_payload = named_entity_contract_graph_to_dict(named_expansion.graph)
+                cross_cik_payload["named_entity_contract_graph"] = named_entity_payload
         else:
             packet = expanded.packet
 
@@ -206,6 +256,8 @@ def main(argv: list[str] | None = None) -> int:
         _write(args.graph_output, graph_payload)
     if args.cross_cik_output and cross_cik_payload is not None:
         _write(args.cross_cik_output, cross_cik_payload)
+    if args.named_entity_output and named_entity_payload is not None:
+        _write(args.named_entity_output, named_entity_payload)
 
     if args.task_output:
         _write(
