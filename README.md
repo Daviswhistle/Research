@@ -228,7 +228,7 @@ distressed-equity-research \
 
 Legal-name graph는 현재 SEC `submissions` metadata와 cutoff 이전 filing의 complete-submission `<SEC-HEADER>`를 교차검증합니다. `FORMER CONFORMED NAME` / `DATE OF NAME CHANGE`가 submissions history의 누락을 보완할 수 있으며, source 간 경계 불일치는 `boundary_conflict`로 노출합니다. Historical header가 현재 metadata와 충돌하면 미래 current-name leakage를 피하도록 point-in-time header를 보수적으로 우선합니다.
 
-Cross-CIK 탐색은 SEC Archives URL, 명시 CIK, exact accession처럼 **source가 target CIK를 직접 증명하는 경우만** 허용합니다. 회사명만으로 다른 CIK를 추정하지 않습니다. `cross_cik_graph.json`은 foreign source resolution과 explicit borrower/issuer/guarantor/subsidiary evidence를 별도 provenance graph로 보존합니다.
+Cross-CIK 탐색은 SEC Archives URL, 명시 CIK, exact accession처럼 **source가 target CIK를 직접 증명하는 경우만** explicit traversal로 취급합니다. 회사명만 있는 외부 borrower/issuer/guarantor는 별도 `named_entity_contract_graph.json`에 candidate/confirmation provenance를 보존합니다. 이 fallback은 SEC `company_tickers.json`뿐 아니라 공식 누적 CIK/name 파일 `Archives/edgar/cik-lookup-data.txt`도 **candidate generation에만** 사용하므로 ticker가 없는 finance subsidiary나 historical filer도 후보가 될 수 있습니다. 실제 CIK resolution은 source-date SEC legal-name 확인과 unique historical contract exhibit 확인이 모두 성공할 때만 허용하며, name-origin 결과를 `resolved_cross_cik`로 가장하지 않습니다. 자세한 규칙은 [`docs/NAMED_ENTITY_CONTRACT_RESOLUTION.md`](docs/NAMED_ENTITY_CONTRACT_RESOLUTION.md)를 참고하세요.
 
 Agent가 filing별 debt instrument snapshot을 구조화했다면 같은 workspace에서 stable ledger를 함께 만들 수 있습니다.
 
@@ -258,69 +258,3 @@ distressed-equity-research \
 ### Survivorship-aware historical market replay
 
 현재 살아 있는 종목만 과거로 되감는 오류를 피하기 위해 point-in-time market/universe 계층을 별도로 둡니다.
-
-소규모 역사검증은 Alpha Vantage의 historical `LISTING_STATUS`, raw daily price, weekly adjusted price를 사용합니다. 종목별 가격 호출이 필요한 provider이므로 기본적으로 전체시장 bulk replay를 허용하지 않습니다.
-
-```bash
-export ALPHA_VANTAGE_API_KEY="..."
-
-distressed-equity-replay \
-  --provider alpha-vantage \
-  --analysis-date 2022-12-31 \
-  --symbols CVNA,UPST,OPEN \
-  --min-drawdown 0.60 \
-  --markdown-output output/replay.md \
-  -o output/replay.json
-```
-
-전체시장/장기 replay는 permanent security ID를 가진 bulk export를 권장합니다. CRSP를 사용할 경우 PERMNO를 `security_id`로 정규화해 넣을 수 있습니다.
-
-```bash
-distressed-equity-replay \
-  --provider csv \
-  --analysis-date 2022-12-31 \
-  --securities-csv data/security_master.csv \
-  --prices-csv data/prices.csv \
-  -o output/replay.json
-```
-
-raw price는 cutoff market-cap 재구성에, adjusted price는 split 때문에 생기는 가짜 drawdown을 막는 후보 생성용으로 분리합니다. 이 price drawdown은 최종 peak-market-cap/EV distress gate를 대체하지 않습니다.
-
-### Point-in-time base rates
-
-과거 distress 사례의 결과를 확률 anchor로 쓸 때도 look-ahead를 막습니다.
-
-```bash
-distressed-equity-base-rates cases.jsonl \
-  --cutoff 2022-12-31 \
-  --impairment-type cyclical \
-  --leverage-bucket high
-```
-
-각 사례에는 `analysis_date`뿐 아니라 `outcome_known_date`를 저장합니다. cutoff 이후에야 결과가 알려진 사례는 당시 base rate에 들어갈 수 없고, 현재 평가 중인 동일 사례도 제외할 수 있습니다.
-
-자세한 설계:
-
-- [`docs/DISTRESSED_EQUITY.md`](docs/DISTRESSED_EQUITY.md)
-- [`docs/SEC_EVIDENCE.md`](docs/SEC_EVIDENCE.md)
-- [`docs/SEC_CAPITAL_STACK.md`](docs/SEC_CAPITAL_STACK.md)
-- [`docs/DEBT_INSTRUMENT_LEDGER.md`](docs/DEBT_INSTRUMENT_LEDGER.md)
-- [`docs/CONTRACT_PARTY_IDENTITY.md`](docs/CONTRACT_PARTY_IDENTITY.md)
-- [`docs/LEGAL_NAME_ALIAS_GRAPH.md`](docs/LEGAL_NAME_ALIAS_GRAPH.md)
-- [`docs/SEC_COMPLETE_SUBMISSION_NAME_HEADERS.md`](docs/SEC_COMPLETE_SUBMISSION_NAME_HEADERS.md)
-- [`docs/SOURCE_DOCUMENT_GRAPH.md`](docs/SOURCE_DOCUMENT_GRAPH.md)
-- [`docs/CROSS_CIK_LEGAL_ENTITY_GRAPH.md`](docs/CROSS_CIK_LEGAL_ENTITY_GRAPH.md)
-- [`docs/COVENANT_HEADROOM.md`](docs/COVENANT_HEADROOM.md)
-- [`docs/COVENANT_SENSITIVITY.md`](docs/COVENANT_SENSITIVITY.md)
-- [`docs/AGENT_INGESTION.md`](docs/AGENT_INGESTION.md)
-- [`docs/ORCHESTRATION.md`](docs/ORCHESTRATION.md)
-- [`docs/MARKET_REPLAY.md`](docs/MARKET_REPLAY.md)
-
-### 테스트
-
-```bash
-python -m compileall -q transformation_scanner distressed_equity research_pipeline
-python -m pytest
-```
-
-> 이 저장소의 도구 출력은 매수·매도 신호가 아닙니다. 사람이 원문, 자본구조, 회계처리와 반증 근거를 먼저 검토할 후보를 정렬하는 연구 도구입니다.
