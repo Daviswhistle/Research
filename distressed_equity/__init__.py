@@ -51,6 +51,16 @@ from .sec_instruments import (
     build_sec_instrument_packet,
     instrument_verification_template,
 )
+from .source_graph import (
+    ExpandedInstrumentPacket,
+    SourceDocumentGraph,
+    SourceGraphEdge,
+    SourceGraphNode,
+    SourceReference,
+    expand_instrument_packet_with_references,
+    extract_source_references,
+    resolve_source_document_graph,
+)
 
 __all__ = [
     "AgentResult",
@@ -81,6 +91,9 @@ __all__ = [
     "debt_snapshots_from_dict",
     "diff_capital_stack_packet",
     "DistressScanConfig",
+    "ExpandedInstrumentPacket",
+    "expand_instrument_packet_with_references",
+    "extract_source_references",
     "FilingDocument",
     "ingest_agent_results",
     "ingest_research_bundle",
@@ -96,6 +109,7 @@ __all__ = [
     "PricePoint",
     "required_probability",
     "ResearchBundle",
+    "resolve_source_document_graph",
     "run_historical_replay",
     "screen_candidate",
     "screen_universe",
@@ -103,6 +117,10 @@ __all__ = [
     "ScreeningConfig",
     "SecInstrumentPacket",
     "SecurityIdentity",
+    "SourceDocumentGraph",
+    "SourceGraphEdge",
+    "SourceGraphNode",
+    "SourceReference",
     "time_to_liquidity_exhaustion",
     "validate_agent_result",
     "value_scenario",
