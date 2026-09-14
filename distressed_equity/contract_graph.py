@@ -5,6 +5,7 @@ from datetime import date
 from typing import Iterable
 
 from .contract_identity import ContractIdentity, extract_contract_identities, reverse_search_contract_identity
+from .contract_parties import party_fingerprint
 from .sec import SecClient, SecFiling
 from .sec_instruments import _get_text, extract_source_candidates
 from .source_graph import (
@@ -32,13 +33,25 @@ def _node_for_document(document, *, depth: int) -> SourceGraphNode:
     )
 
 
+def _identity_key(node_id: str, identity: ContractIdentity) -> tuple[str, str, date, tuple[tuple[str, str], ...]]:
+    return (node_id, identity.kind, identity.execution_date, party_fingerprint(identity.parties))
+
+
+def _identity_descriptor(identity: ContractIdentity) -> str:
+    base = f"{identity.kind} dated {identity.execution_date.isoformat()}"
+    if identity.parties:
+        parties = ", ".join(f"{party.role}:{party.normalized_name}" for party in identity.parties)
+        return f"{base}; parties={parties}"
+    return base
+
+
 def _synthetic_reference(node: SourceGraphNode, identity: ContractIdentity, ordinal: int) -> SourceReference:
     return SourceReference(
         reference_id=f"{node.node_id}:contract{ordinal}",
         source_node_id=node.node_id,
         source_accession=node.accession_number,
         source_published_on=node.filing_date,
-        reference_text=f"{identity.title} dated {identity.execution_date.isoformat()}",
+        reference_text=_identity_descriptor(identity),
         confidence="medium",
     )
 
@@ -90,12 +103,14 @@ def enhance_expanded_packet_with_contract_identity(
     contract_days_after_execution: int = 550,
     max_candidates_per_exhibit: int = 20,
 ) -> ExpandedInstrumentPacket:
-    """Resolve locator-less contract references by exact contract kind + execution date.
+    """Resolve locator-less references by contract kind/date and optional parties.
 
     This is deliberately a fallback layer. A contract identity is only linked when
     exactly one SEC exhibit within the bounded historical search window contains
-    the same canonical contract kind and exact execution date. Multiple matches
-    remain ambiguous and are never ranked to a winner.
+    the same canonical contract kind and exact execution date. If the source also
+    exposes borrower/issuer/guarantor fingerprints, those are hard filters. Thus
+    two same-day facilities with different obligors remain separate identities.
+    Multiple matches are never ranked to a winner.
     """
 
     graph = expanded.graph
@@ -111,12 +126,13 @@ def enhance_expanded_packet_with_contract_identity(
     index_cache: dict[str, tuple] = {}
     text_cache: dict[str, str] = {}
 
-    # Preserve existing explicit-reference resolutions. Contract identity is only
-    # added for source documents that do not already have the same identity edge.
-    seen_identity_keys: set[tuple[str, str, date]] = set()
+    # Preserve existing explicit-reference resolutions. Contract identity fallback
+    # is keyed by parties too, so same-kind/same-date facilities with different
+    # obligors are never silently deduplicated.
+    seen_identity_keys: set[tuple[str, str, date, tuple[tuple[str, str], ...]]] = set()
     for reference in references:
         for identity in extract_contract_identities(reference.reference_text):
-            seen_identity_keys.add((reference.source_node_id, identity.kind, identity.execution_date))
+            seen_identity_keys.add(_identity_key(reference.source_node_id, identity))
 
     made_progress = True
     while made_progress and len(nodes) < max_nodes:
@@ -136,7 +152,7 @@ def enhance_expanded_packet_with_contract_identity(
 
             identities = extract_contract_identities(source_text)
             for ordinal, identity in enumerate(identities, 1):
-                identity_key = (source.node_id, identity.kind, identity.execution_date)
+                identity_key = _identity_key(source.node_id, identity)
                 if identity_key in seen_identity_keys:
                     continue
                 seen_identity_keys.add(identity_key)
@@ -157,14 +173,14 @@ def enhance_expanded_packet_with_contract_identity(
 
                 # A contract exhibit normally states its own title and execution
                 # date. Do not turn that self-description into a fake unresolved
-                # reference edge when the reverse search finds only the source
-                # document itself.
+                # reference edge when the reverse search finds only the source.
                 if search.candidates and not candidates and all(item.url == source.url for item in search.candidates):
                     continue
 
                 reference = _synthetic_reference(source, identity, ordinal)
                 references.append(reference)
                 edge_id = f"edge:{len(edges) + 1}"
+                descriptor = _identity_descriptor(identity)
 
                 if not candidates:
                     edges.append(
@@ -175,8 +191,7 @@ def enhance_expanded_packet_with_contract_identity(
                             to_node_id=None,
                             status="unresolved_contract_identity",
                             reason=(
-                                f"no unique SEC exhibit matched {identity.kind} dated "
-                                f"{identity.execution_date.isoformat()} within bounded historical search"
+                                f"no SEC exhibit matched {descriptor} within bounded historical search"
                             ),
                         )
                     )
@@ -190,8 +205,7 @@ def enhance_expanded_packet_with_contract_identity(
                             to_node_id=None,
                             status="ambiguous_contract_identity",
                             reason=(
-                                f"{len(candidates)} SEC exhibits matched {identity.kind} dated "
-                                f"{identity.execution_date.isoformat()}; no automatic selection"
+                                f"{len(candidates)} SEC exhibits matched {descriptor}; no automatic selection"
                             ),
                         )
                     )
@@ -225,10 +239,7 @@ def enhance_expanded_packet_with_contract_identity(
                         reference_id=reference.reference_id,
                         to_node_id=target_node.node_id,
                         status="resolved_by_contract_identity",
-                        reason=(
-                            f"unique SEC exhibit matched canonical contract kind {identity.kind} "
-                            f"and exact execution date {identity.execution_date.isoformat()}"
-                        ),
+                        reason=f"unique SEC exhibit matched {descriptor}",
                         target_accession=document.source_accession,
                         target_exhibit=document.document_type,
                     )
