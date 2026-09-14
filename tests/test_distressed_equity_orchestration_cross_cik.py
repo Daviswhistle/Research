@@ -89,13 +89,13 @@ def index_html(primary, rows=""):
 
 
 def test_research_bundle_freezes_cross_cik_graph_and_foreign_debt_source():
-    root = filing("1111111111", "0001111111-22-000001", date(2022, 11, 1), "10-Q", "parent.htm")
-    foreign = filing("2222222222", "0002222222-20-000010", date(2020, 5, 15), "8-K", "borrower8k.htm")
+    root = filing("1111111", "0001111111-22-000001", date(2022, 11, 1), "10-Q", "parent.htm")
+    foreign = filing("2222222", "0002222222-20-000010", date(2020, 5, 15), "8-K", "borrower8k.htm")
     foreign_base = filing_index_url(foreign).rsplit("/", 1)[0]
     foreign_exhibit = foreign_base + "/ex10-1.htm"
     root_html = (
         '<html><body><p>$500 million of senior notes mature in 2027.</p>'
-        '<a href="/Archives/edgar/data/2222222222/000222222220000010/ex10-1.htm">'
+        '<a href="/Archives/edgar/data/2222222/000222222220000010/ex10-1.htm">'
         'Borrower Credit Agreement</a></body></html>'
     )
     foreign_rows = (
@@ -123,12 +123,12 @@ def test_research_bundle_freezes_cross_cik_graph_and_foreign_debt_source():
     graph = packet["cross_cik_graph"]
     assert graph is not None
     assert any(item["status"] == "resolved_cross_cik" for item in graph["resolutions"])
-    assert any(item["target_cik"] == "2222222222" for item in graph["references"])
+    assert any(item["target_cik"] == "0002222222" for item in graph["references"])
     name_graphs = {item["cik"]: item for item in graph["legal_name_alias_graphs"]}
-    assert set(name_graphs) == {"1111111111", "2222222222"}
-    assert name_graphs["2222222222"]["canonical_name_as_of"] == "Borrower New LLC"
+    assert set(name_graphs) == {"0001111111", "0002222222"}
+    assert name_graphs["0002222222"]["canonical_name_as_of"] == "Borrower New LLC"
     assert {
-        item["normalized_name"] for item in name_graphs["2222222222"]["records"]
+        item["normalized_name"] for item in name_graphs["0002222222"]["records"]
     } == {"borrower old llc", "borrower new llc"}
     assert any(
         candidate["snapshot_template"].get("commitment") == 700_000_000
