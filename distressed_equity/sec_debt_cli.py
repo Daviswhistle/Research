@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .agent_results import agent_result_template
 from .sec import SecClient
 from .sec_debt import (
     build_capital_stack_agent_task,
@@ -75,13 +76,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     _write(args.output, capital_stack_packet_to_dict(packet))
     if args.task_output:
+        task = build_capital_stack_agent_task(packet)
         _write(
             args.task_output,
             {
                 "ticker": snapshot.ticker,
                 "company_name": snapshot.company_name,
                 "analysis_date": cutoff.isoformat(),
-                "task": asdict(build_capital_stack_agent_task(packet)),
+                "task": asdict(task),
+                "result_template": agent_result_template(task.name, cutoff),
             },
         )
     return 0
