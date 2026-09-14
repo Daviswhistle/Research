@@ -133,10 +133,32 @@ distressed-equity-sec-debt \
   --analysis-date 2022-12-31 \
   --filing-limit 3 \
   -o output/cvna_capital_stack_packet.json \
+  --diff-output output/cvna_capital_stack_diff.json \
   --task-output output/cvna_capital_stack_task.json
 ```
 
-정규식으로 찾은 금액·연도·금리는 **후보**일 뿐 자동 debt schedule로 승격하지 않습니다. Instrument와 조건을 source filing에서 다시 확인한 뒤 structured agent result로 제출해야 합니다.
+정규식으로 찾은 금액·연도·금리는 **후보**일 뿐 자동 debt schedule로 승격하지 않습니다. Filing-to-filing diff도 confirmed amendment가 아니라 금액/만기/비율 신호가 바뀐 위치를 알려주는 탐색 도구입니다.
+
+### Covenant EBITDA / headroom
+
+Maintenance covenant는 계약 정의와 실제 계산을 분리합니다. 에이전트가 계약에서 permitted add-back, required deduction, cash-netting rule, springing trigger를 구조화하면 코드가 covenant EBITDA와 headroom을 계산합니다.
+
+```bash
+distressed-equity-covenant covenant_input.json \
+  -o covenant_result.json
+```
+
+지원 항목:
+
+- max net leverage
+- max total leverage
+- minimum interest coverage
+- minimum fixed-charge coverage
+- minimum liquidity
+- springing revolver trigger
+- minimum EBITDA to comply / EBITDA cushion
+
+출력의 `agent_result`는 `distressed-equity-ingest`에 그대로 넣을 수 있습니다. Add-back 허용 여부 자체를 코드가 추정하지 않는 것이 핵심입니다.
 
 ### Structured agent result ingestion
 
@@ -151,6 +173,35 @@ distressed-equity-ingest output/cvna_2022-12-31_sec.json \
 ```
 
 Low-confidence patch는 기본적으로 evidence만 남기고 값을 바꾸지 않습니다. 이미 채워진 non-null 값과 다른 제안도 기본적으로 overwrite하지 않습니다. 필수 deterministic field가 모두 채워지면 같은 실행에서 screener까지 자동 실행합니다.
+
+### Resumable one-company orchestration
+
+SEC, debt/covenant packet, filing diff, optional market snapshot, task template 생성을 한 workspace로 묶을 수 있습니다.
+
+```bash
+export SEC_USER_AGENT="Research your-email@example.com"
+export ALPHA_VANTAGE_API_KEY="..."  # optional
+
+distressed-equity-research \
+  --ticker CVNA \
+  --analysis-date 2022-12-31 \
+  --market-provider alpha-vantage \
+  --workspace output/cvna_2022-12-31
+```
+
+Agent result가 준비되면 같은 workspace에서 재개합니다.
+
+```bash
+distressed-equity-research \
+  --ticker CVNA \
+  --analysis-date 2022-12-31 \
+  --workspace output/cvna_2022-12-31 \
+  --result output/capital_stack_result.json \
+  --result output/market_result.json \
+  --result output/normalization_result.json
+```
+
+기존 `research_packet.json`은 기본적으로 frozen input으로 재사용합니다. 데이터를 의도적으로 다시 수집하려면 `--refresh`를 사용합니다.
 
 ### Survivorship-aware historical market replay
 
@@ -201,7 +252,9 @@ distressed-equity-base-rates cases.jsonl \
 - [`docs/DISTRESSED_EQUITY.md`](docs/DISTRESSED_EQUITY.md)
 - [`docs/SEC_EVIDENCE.md`](docs/SEC_EVIDENCE.md)
 - [`docs/SEC_CAPITAL_STACK.md`](docs/SEC_CAPITAL_STACK.md)
+- [`docs/COVENANT_HEADROOM.md`](docs/COVENANT_HEADROOM.md)
 - [`docs/AGENT_INGESTION.md`](docs/AGENT_INGESTION.md)
+- [`docs/ORCHESTRATION.md`](docs/ORCHESTRATION.md)
 - [`docs/MARKET_REPLAY.md`](docs/MARKET_REPLAY.md)
 
 ### 테스트
