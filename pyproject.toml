@@ -34,7 +34,7 @@ distressed-equity-replay = "distressed_equity.replay_cli:main"
 distressed-equity-base-rates = "distressed_equity.base_rate_cli:main"
 
 [tool.setuptools.packages.find]
-include = ["transformation_scanner*", "distressed_equity*"]
+include = ["transformation_scanner*", "research_pipeline*", "distressed_equity*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
