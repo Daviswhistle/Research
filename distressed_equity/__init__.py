@@ -42,6 +42,15 @@ from .market import MarketSnapshot, PricePoint, SecurityIdentity
 from .orchestration import ResearchBundle, build_research_bundle, ingest_research_bundle
 from .replay import DistressScanConfig, MarketDistressSeed, run_historical_replay
 from .screening import ScreeningConfig, screen_candidate, screen_universe
+from .sec_instruments import (
+    DebtInstrumentSourceCandidate,
+    FilingDocument,
+    InstrumentFieldProposal,
+    InstrumentSourceSpan,
+    SecInstrumentPacket,
+    build_sec_instrument_packet,
+    instrument_verification_template,
+)
 
 __all__ = [
     "AgentResult",
@@ -53,6 +62,7 @@ __all__ = [
     "BaseRateSummary",
     "build_debt_instrument_ledger",
     "build_research_bundle",
+    "build_sec_instrument_packet",
     "calculate_covenant_addback_sensitivity",
     "calculate_covenant_headroom",
     "CapitalStackDiffReport",
@@ -66,13 +76,18 @@ __all__ = [
     "covenant_model_from_dict",
     "DebtInstrumentLedger",
     "DebtInstrumentSnapshot",
+    "DebtInstrumentSourceCandidate",
     "DebtInstrumentVersion",
     "debt_snapshots_from_dict",
     "diff_capital_stack_packet",
     "DistressScanConfig",
+    "FilingDocument",
     "ingest_agent_results",
     "ingest_research_bundle",
     "IngestionReport",
+    "InstrumentFieldProposal",
+    "InstrumentSourceSpan",
+    "instrument_verification_template",
     "load_case",
     "load_screening_universe",
     "MarketDistressSeed",
@@ -86,6 +101,7 @@ __all__ = [
     "screen_universe",
     "screening_candidate_from_dict",
     "ScreeningConfig",
+    "SecInstrumentPacket",
     "SecurityIdentity",
     "time_to_liquidity_exhaustion",
     "validate_agent_result",
