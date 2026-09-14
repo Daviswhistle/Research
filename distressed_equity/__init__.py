@@ -106,6 +106,12 @@ from .named_entity_contracts import (
 from .orchestration import ResearchBundle, build_research_bundle, ingest_research_bundle
 from .replay import DistressScanConfig, MarketDistressSeed, run_historical_replay
 from .screening import ScreeningConfig, screen_candidate, screen_universe
+from .sec_cik_lookup import (
+    SEC_CIK_LOOKUP_URL,
+    SecCikLookupMatch,
+    fetch_cik_lookup_matches,
+    parse_cik_lookup_matches,
+)
 from .sec_instruments import (
     DebtInstrumentSourceCandidate,
     FilingDocument,
@@ -183,6 +189,7 @@ __all__ = [
     "extract_cross_cik_references",
     "extract_explicit_legal_entity_evidence",
     "extract_source_references",
+    "fetch_cik_lookup_matches",
     "fetch_complete_submission_name_evidence",
     "FilingDocument",
     "ForeignContractExpansion",
@@ -211,6 +218,7 @@ __all__ = [
     "NamedEntityContractResolution",
     "named_entity_contract_graph_to_dict",
     "normalize_party_name",
+    "parse_cik_lookup_matches",
     "party_fingerprint",
     "PatchProposal",
     "PricePoint",
@@ -227,6 +235,8 @@ __all__ = [
     "screen_universe",
     "screening_candidate_from_dict",
     "ScreeningConfig",
+    "SEC_CIK_LOOKUP_URL",
+    "SecCikLookupMatch",
     "SecInstrumentPacket",
     "SecurityIdentity",
     "SourceDocumentGraph",
