@@ -95,6 +95,14 @@ from .legal_name_reconcile import (
     reconcile_legal_name_sources,
 )
 from .market import MarketSnapshot, PricePoint, SecurityIdentity
+from .named_entity_contracts import (
+    ExternalEntityCandidate,
+    NamedEntityContractExpansion,
+    NamedEntityContractGraph,
+    NamedEntityContractResolution,
+    named_entity_contract_graph_to_dict,
+    resolve_named_entity_contracts,
+)
 from .orchestration import ResearchBundle, build_research_bundle, ingest_research_bundle
 from .replay import DistressScanConfig, MarketDistressSeed, run_historical_replay
 from .screening import ScreeningConfig, screen_candidate, screen_universe
@@ -168,6 +176,7 @@ __all__ = [
     "expand_foreign_contract_identities",
     "expand_instrument_packet_with_references",
     "expand_packet_with_cross_cik",
+    "ExternalEntityCandidate",
     "extract_complete_submission_name_evidence",
     "extract_contract_identities",
     "extract_contract_parties",
@@ -197,6 +206,10 @@ __all__ = [
     "load_screening_universe",
     "MarketDistressSeed",
     "MarketSnapshot",
+    "NamedEntityContractExpansion",
+    "NamedEntityContractGraph",
+    "NamedEntityContractResolution",
+    "named_entity_contract_graph_to_dict",
     "normalize_party_name",
     "party_fingerprint",
     "PatchProposal",
@@ -206,6 +219,7 @@ __all__ = [
     "required_probability",
     "ResearchBundle",
     "resolve_cross_cik_graph",
+    "resolve_named_entity_contracts",
     "resolve_source_document_graph",
     "reverse_search_contract_identity",
     "run_historical_replay",
