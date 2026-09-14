@@ -204,3 +204,38 @@ def foreign_contract_expansion_to_dict(expansion: ForeignContractExpansion) -> d
         "graphs": convert(expansion.graphs),
         "warnings": list(expansion.warnings),
     }
+
+
+_legacy_expand_foreign_contract_identities = expand_foreign_contract_identities
+
+
+def expand_foreign_contract_identities(
+    client: SecClient,
+    *,
+    cross_expanded: CrossCikExpandedPacket,
+    legal_name_graphs: Iterable[LegalNameGraphLike],
+    max_depth: int = 3,
+    max_nodes: int = 80,
+    max_contract_search_filings: int = 40,
+    contract_days_before_execution: int = 30,
+    contract_days_after_execution: int = 550,
+    max_candidates_per_exhibit: int = 20,
+    max_iterations: int = 8,
+) -> ForeignContractExpansion:
+    """Run the legacy foreign pass, then close newly exposed cross-CIK links."""
+
+    from .foreign_contract_closure import expand_foreign_contract_closure
+
+    return expand_foreign_contract_closure(
+        client,
+        cross_expanded=cross_expanded,
+        legal_name_graphs=legal_name_graphs,
+        legacy_expand=_legacy_expand_foreign_contract_identities,
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+        max_contract_search_filings=max_contract_search_filings,
+        contract_days_before_execution=contract_days_before_execution,
+        contract_days_after_execution=contract_days_after_execution,
+        max_candidates_per_exhibit=max_candidates_per_exhibit,
+        max_iterations=max_iterations,
+    )
