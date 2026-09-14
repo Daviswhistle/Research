@@ -19,6 +19,7 @@ from .io import screening_candidate_from_dict
 from .legal_name_alias import (
     alias_groups_from_graphs,
     build_legal_name_alias_graph,
+    build_legal_name_alias_graphs,
     legal_name_alias_graph_to_dict,
 )
 from .market import HistoricalMarketProvider, market_snapshot
@@ -208,6 +209,21 @@ def build_research_bundle(
             )
             instrument_packet = cross_expanded.packet
             cross_cik_graph_payload = cross_cik_graph_to_dict(cross_expanded.cross_cik_graph)
+            encountered_ciks = {
+                item.cik for item in cross_expanded.cross_cik_graph.entity_nodes
+            } | {
+                item.target_cik for item in cross_expanded.cross_cik_graph.references
+            } | {snapshot.cik}
+            legal_graphs, legal_graph_warnings = build_legal_name_alias_graphs(
+                sec_client,
+                ciks=encountered_ciks,
+                analysis_date=analysis_date,
+                existing=(legal_name_graph,),
+            )
+            cross_cik_graph_payload["legal_name_alias_graphs"] = [
+                legal_name_alias_graph_to_dict(item) for item in legal_graphs
+            ]
+            warnings.extend(legal_graph_warnings)
             warnings.extend(cross_expanded.cross_cik_graph.warnings)
         else:
             instrument_packet = expanded.packet
@@ -321,6 +337,7 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
     entity_nodes = cross_graph.get("entity_nodes", []) if isinstance(cross_graph, dict) else []
     entity_roles = cross_graph.get("entity_roles", []) if isinstance(cross_graph, dict) else []
     entity_relations = cross_graph.get("entity_relations", []) if isinstance(cross_graph, dict) else []
+    cross_name_graphs = cross_graph.get("legal_name_alias_graphs", []) if isinstance(cross_graph, dict) else []
     lines = [
         f"# {bundle.company_name} ({bundle.ticker or 'CIK'}) research workspace",
         "",
@@ -337,6 +354,7 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
         f"- Source-backed debt instrument candidates: {len(source_packet.get('candidates', []))}",
         f"- Incorporation/reference graph edges: {len(graph_edges)} ({resolved_edges} resolved)",
         f"- Cross-CIK SEC resolutions: {len(cross_resolutions)} ({resolved_cross} resolved)",
+        f"- Cross-CIK legal-name graphs frozen: {len(cross_name_graphs)}",
         f"- Explicit legal-entity graph: {len(entity_nodes)} entities / {len(entity_roles)} roles / {len(entity_relations)} relations",
         f"- Cutoff share price: {draft.get('capital_structure', {}).get('current_price')}",
         "",
@@ -345,7 +363,7 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
         "1. Review `legal_name_alias_graph.json`; only cutoff-safe SEC rename evidence can bridge legal names.",
         "2. Review filing-to-filing capital-stack changes against source filings.",
         "3. Review the source-document graph; inspect unresolved/ambiguous locator and contract-identity edges.",
-        "4. Review `cross_cik_graph.json`; foreign CIK traversal must be backed by explicit SEC CIK/Archives locators.",
+        "4. Review `cross_cik_graph.json`; foreign CIK traversal and its legal-name graphs must come from explicit SEC CIK identity.",
         "5. Review `debt_instrument_template.json`; verify/delete candidate fields against cited exhibit spans.",
         "6. Feed verified snapshots to `distressed-equity-debt-ledger` for stable instrument identity and amendment tracking.",
         "7. Have screening agents return the supplied structured result templates.",
