@@ -20,7 +20,7 @@ selection / diversity reranking
 research queue
 ```
 
-현재는 기존 `transformation_scanner`를 adapter로 연결할 수 있으며, Top-K와 dependency-free MMR형 diversity selector를 제공합니다. Carvana형 distressed-equity 탐색 로직은 독립된 `distressed_equity` 패키지에서 개발하고 공통 pipeline과의 결합은 후속 단계에서 진행합니다.
+현재는 기존 `transformation_scanner`를 adapter로 연결할 수 있으며, Top-K와 dependency-free MMR형 diversity selector를 제공합니다. Carvana형 distressed-equity 탐색 로직은 별도 작업과 충돌하지 않도록 구현하지 않고 후속 이슈에서 추적합니다.
 
 자세한 설계와 의도적으로 제외한 범위는 [`docs/RESEARCH_PIPELINE.md`](docs/RESEARCH_PIPELINE.md)를 참고하세요.
 
@@ -213,7 +213,7 @@ Low-confidence patch는 기본적으로 evidence만 남기고 값을 바꾸지 �
 
 ### Resumable one-company orchestration
 
-SEC, debt/covenant packet, filing diff, point-in-time legal-name graph, source-document graph, explicit cross-CIK source/legal-entity graph, optional market snapshot, task template 생성을 한 workspace로 묶을 수 있습니다.
+SEC, debt/covenant packet, filing diff, source-document graph, explicit cross-CIK source/legal-entity graph, optional market snapshot, task template 생성을 한 workspace로 묶을 수 있습니다.
 
 ```bash
 export SEC_USER_AGENT="Research your-email@example.com"
@@ -226,9 +226,9 @@ distressed-equity-research \
   --workspace output/cvna_2022-12-31
 ```
 
-동일 CIK의 법적 명칭 변경은 SEC submissions의 former-name metadata가 **분석 cutoff 이전에 확인해 주는 경우만** alias로 연결합니다. 미래 rename은 과거 contract party matching에 쓰지 않으며, 과거 workspace의 표시명과 evidence에도 미래 current name이 새지 않도록 당시 canonical name을 사용합니다. `formerNames.from/to`는 이 파이프라인에서 SEC identity metadata의 시간 경계로 취급하며 주법상 법적 효력일로 단정하지 않습니다. 결과는 `legal_name_alias_graph.json`에 별도로 보존합니다.
+Legal-name graph는 현재 SEC `submissions` metadata와 cutoff 이전 filing의 complete-submission `<SEC-HEADER>`를 교차검증합니다. `FORMER CONFORMED NAME` / `DATE OF NAME CHANGE`가 submissions history의 누락을 보완할 수 있으며, source 간 경계 불일치는 `boundary_conflict`로 노출합니다. Historical header가 현재 metadata와 충돌하면 미래 current-name leakage를 피하도록 point-in-time header를 보수적으로 우선합니다.
 
-Cross-CIK 탐색은 SEC Archives URL, 명시 CIK, exact accession처럼 **source가 target CIK를 직접 증명하는 경우만** 허용합니다. 회사명만으로 다른 CIK를 추정하지 않습니다. `cross_cik_graph.json`은 foreign source resolution과 explicit borrower/issuer/guarantor/subsidiary evidence를 별도 provenance graph로 보존하고, 이미 명시적으로 발견된 foreign CIK들의 cutoff-safe legal-name history도 함께 freeze합니다.
+Cross-CIK 탐색은 SEC Archives URL, 명시 CIK, exact accession처럼 **source가 target CIK를 직접 증명하는 경우만** 허용합니다. 회사명만으로 다른 CIK를 추정하지 않습니다. `cross_cik_graph.json`은 foreign source resolution과 explicit borrower/issuer/guarantor/subsidiary evidence를 별도 provenance graph로 보존합니다.
 
 Agent가 filing별 debt instrument snapshot을 구조화했다면 같은 workspace에서 stable ledger를 함께 만들 수 있습니다.
 
@@ -301,13 +301,13 @@ distressed-equity-base-rates cases.jsonl \
 
 자세한 설계:
 
-- [`docs/RESEARCH_PIPELINE.md`](docs/RESEARCH_PIPELINE.md)
 - [`docs/DISTRESSED_EQUITY.md`](docs/DISTRESSED_EQUITY.md)
 - [`docs/SEC_EVIDENCE.md`](docs/SEC_EVIDENCE.md)
 - [`docs/SEC_CAPITAL_STACK.md`](docs/SEC_CAPITAL_STACK.md)
 - [`docs/DEBT_INSTRUMENT_LEDGER.md`](docs/DEBT_INSTRUMENT_LEDGER.md)
 - [`docs/CONTRACT_PARTY_IDENTITY.md`](docs/CONTRACT_PARTY_IDENTITY.md)
 - [`docs/LEGAL_NAME_ALIAS_GRAPH.md`](docs/LEGAL_NAME_ALIAS_GRAPH.md)
+- [`docs/SEC_COMPLETE_SUBMISSION_NAME_HEADERS.md`](docs/SEC_COMPLETE_SUBMISSION_NAME_HEADERS.md)
 - [`docs/SOURCE_DOCUMENT_GRAPH.md`](docs/SOURCE_DOCUMENT_GRAPH.md)
 - [`docs/CROSS_CIK_LEGAL_ENTITY_GRAPH.md`](docs/CROSS_CIK_LEGAL_ENTITY_GRAPH.md)
 - [`docs/COVENANT_HEADROOM.md`](docs/COVENANT_HEADROOM.md)
@@ -319,8 +319,8 @@ distressed-equity-base-rates cases.jsonl \
 ### 테스트
 
 ```bash
-python -m compileall -q transformation_scanner research_pipeline distressed_equity
+python -m compileall -q transformation_scanner distressed_equity research_pipeline
 python -m pytest
 ```
 
-> 이 도구들의 결과는 매수·매도 신호가 아닙니다. 사람이 원문, 자본구조, 회계처리와 반증 근거를 먼저 검토할 후보를 정렬하는 연구 도구입니다.
+> 이 저장소의 도구 출력은 매수·매도 신호가 아닙니다. 사람이 원문, 자본구조, 회계처리와 반증 근거를 먼저 검토할 후보를 정렬하는 연구 도구입니다.
