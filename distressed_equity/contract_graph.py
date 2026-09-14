@@ -140,8 +140,6 @@ def enhance_expanded_packet_with_contract_identity(
                 if identity_key in seen_identity_keys:
                     continue
                 seen_identity_keys.add(identity_key)
-                reference = _synthetic_reference(source, identity, ordinal)
-                references.append(reference)
 
                 search = reverse_search_contract_identity(
                     client,
@@ -156,6 +154,16 @@ def enhance_expanded_packet_with_contract_identity(
                 )
                 warnings.extend(search.warnings)
                 candidates = [item for item in search.candidates if item.url != source.url]
+
+                # A contract exhibit normally states its own title and execution
+                # date. Do not turn that self-description into a fake unresolved
+                # reference edge when the reverse search finds only the source
+                # document itself.
+                if search.candidates and not candidates and all(item.url == source.url for item in search.candidates):
+                    continue
+
+                reference = _synthetic_reference(source, identity, ordinal)
+                references.append(reference)
                 edge_id = f"edge:{len(edges) + 1}"
 
                 if not candidates:
