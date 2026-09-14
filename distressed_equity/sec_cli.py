@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .agent_results import agent_result_template
 from .evidence import validate_point_in_time
 from .prefill import build_screening_draft, build_sec_prefill_tasks
 from .sec import DEFAULT_FORMS, SecClient, snapshot_to_dict, snapshot_to_evidence
@@ -68,12 +69,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     evidence = snapshot_to_evidence(snapshot)
     tasks = build_sec_prefill_tasks(snapshot)
+    templates = {task.name: agent_result_template(task.name, cutoff) for task in tasks}
     payload = {
         "snapshot": snapshot_to_dict(snapshot),
         "evidence": [_jsonable(asdict(record)) for record in evidence],
         "point_in_time_violations": list(validate_point_in_time(evidence, cutoff)),
         "screening_draft": build_screening_draft(snapshot),
         "agent_tasks": [_jsonable(asdict(task)) for task in tasks],
+        "agent_result_templates": templates,
     }
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
@@ -91,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
                 "company_name": snapshot.company_name,
                 "analysis_date": snapshot.analysis_date.isoformat(),
                 "tasks": [asdict(task) for task in tasks],
+                "result_templates": templates,
             },
         )
     return 0
