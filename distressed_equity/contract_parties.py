@@ -20,12 +20,16 @@ _LEGAL_SUFFIX = (
 )
 _PARTY_NAME = rf"(?P<name>[A-Z][A-Za-z0-9&'’.,()\-/ ]{{1,120}}?{_LEGAL_SUFFIX})"
 _ROLE = r"(?P<role>co[- ]borrower|borrower|issuer|parent\s+guarantor|guarantor)"
+_CONTRACT_TERMS = (
+    "credit agreement",
+    "loan agreement",
+    "indenture",
+    "note purchase agreement",
+    "security agreement",
+    "guaranty agreement",
+    "guarantee agreement",
+)
 
-# Common agreement preamble forms:
-#   ABC Borrower LLC, as Borrower
-#   ABC Borrower LLC, a Delaware limited liability company, as Borrower
-#   ABC Borrower LLC (the "Borrower")
-#   Borrower: ABC Borrower LLC
 _ROLE_AFTER_NAME_RE = re.compile(
     rf"{_PARTY_NAME}(?:\s*,[^.;]{{0,90}}?)?\s*,?\s+as\s+(?:the\s+)?{_ROLE}\b",
     re.IGNORECASE,
@@ -79,12 +83,7 @@ def normalize_party_name(name: str) -> str:
 
 
 def _trim_captured_party_name(raw: str) -> str:
-    """Discard clause text accidentally captured before the final legal entity."""
-
     name = re.sub(r"\s+", " ", raw).strip(" ,")
-    # Prefer the last sentence/clause because the regex is suffix-anchored on the
-    # legal entity but can begin too early in prose such as
-    # "Credit Agreement dated ... ABC Borrower LLC, as Borrower".
     for separator in (". ", "; "):
         if separator in name:
             name = name.rsplit(separator, 1)[-1].strip(" ,")
@@ -98,8 +97,20 @@ def _trim_captured_party_name(raw: str) -> str:
     return name
 
 
+def _cross_sentence_contract_capture(raw: str) -> bool:
+    """Reject a party regex that crossed a prior contract sentence boundary."""
+
+    if ". " not in raw:
+        return False
+    prefix = raw.rsplit(". ", 1)[0].lower()
+    return any(term in prefix for term in _CONTRACT_TERMS)
+
+
 def _party_from_match(match: re.Match[str]) -> ContractParty | None:
-    name = _trim_captured_party_name(match.group("name"))
+    raw_name = match.group("name")
+    if _cross_sentence_contract_capture(raw_name):
+        return None
+    name = _trim_captured_party_name(raw_name)
     normalized = normalize_party_name(name)
     if not normalized or normalized in _GENERIC_PARTY_NAMES:
         return None
@@ -131,16 +142,7 @@ def contract_parties_compatible(
     target_parties: Iterable[ContractParty],
     candidate_parties: Iterable[ContractParty],
 ) -> bool:
-    """Hard-filter party compatibility for locator-less fallback matching.
-
-    If the source contract mention names a borrower/issuer, at least one same-role
-    legal entity must be present in the candidate exhibit. A source that only
-    identifies guarantors requires a guarantor overlap. Guarantors are also used
-    as a disambiguator when both sides explicitly expose them.
-
-    When the source has no explicit party fingerprint, this layer is neutral and
-    the existing contract-kind/date rules decide the match.
-    """
+    """Hard-filter party compatibility for locator-less fallback matching."""
 
     target = tuple(target_parties)
     candidate = tuple(candidate_parties)
