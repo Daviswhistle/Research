@@ -36,9 +36,13 @@ class FakeSecClient:
 
     def submissions(self, cik):
         key = str(cik).zfill(10)
+        if key == self.root.cik:
+            return {"name": "Parent Co", "formerNames": []}
         return {
-            "name": "Parent Co" if key == self.root.cik else "Borrower Co",
-            "formerNames": [],
+            "name": "Borrower New LLC",
+            "formerNames": [
+                {"name": "Borrower Old LLC", "from": "2010-01-01", "to": "2021-06-01"},
+            ],
         }
 
     def snapshot(self, **kwargs):
@@ -120,11 +124,18 @@ def test_research_bundle_freezes_cross_cik_graph_and_foreign_debt_source():
     assert graph is not None
     assert any(item["status"] == "resolved_cross_cik" for item in graph["resolutions"])
     assert any(item["target_cik"] == "2222222222" for item in graph["references"])
+    name_graphs = {item["cik"]: item for item in graph["legal_name_alias_graphs"]}
+    assert set(name_graphs) == {"1111111111", "2222222222"}
+    assert name_graphs["2222222222"]["canonical_name_as_of"] == "Borrower New LLC"
+    assert {
+        item["normalized_name"] for item in name_graphs["2222222222"]["records"]
+    } == {"borrower old llc", "borrower new llc"}
     assert any(
         candidate["snapshot_template"].get("commitment") == 700_000_000
         for candidate in packet["debt_instrument_source_packet"]["candidates"]
     )
     summary = render_research_summary(bundle)
     assert "Cross-CIK SEC resolutions" in summary
+    assert "Cross-CIK legal-name graphs frozen: 2" in summary
     assert "Explicit legal-entity graph" in summary
     assert "Canonical legal name at cutoff" in summary
