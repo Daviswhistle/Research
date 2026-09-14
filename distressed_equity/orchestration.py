@@ -15,6 +15,10 @@ from .capital_stack_diff import capital_stack_diff_to_dict, diff_capital_stack_p
 from .contract_graph import enhance_expanded_packet_with_contract_identity
 from .cross_cik import cross_cik_graph_to_dict, expand_packet_with_cross_cik
 from .evidence import EvidenceRecord, validate_point_in_time
+from .foreign_contract_graph import (
+    expand_foreign_contract_identities,
+    foreign_contract_expansion_to_dict,
+)
 from .io import screening_candidate_from_dict
 from .legal_name_alias import (
     alias_groups_from_graphs,
@@ -229,6 +233,26 @@ def build_research_bundle(
                 legal_name_alias_graph_to_dict(item) for item in legal_graphs
             ]
             warnings.extend(legal_graph_warnings)
+
+            if resolve_contract_identity_references:
+                foreign_expansion = expand_foreign_contract_identities(
+                    sec_client,
+                    cross_expanded=cross_expanded,
+                    legal_name_graphs=legal_graphs,
+                    max_depth=reference_depth,
+                    max_nodes=cross_cik_max_nodes,
+                    max_contract_search_filings=contract_search_max_filings,
+                    contract_days_before_execution=contract_days_before_execution,
+                    contract_days_after_execution=contract_days_after_execution,
+                    max_candidates_per_exhibit=max_instrument_candidates_per_exhibit,
+                )
+                cross_expanded = foreign_expansion.cross_expanded
+                instrument_packet = cross_expanded.packet
+                foreign_payload = foreign_contract_expansion_to_dict(foreign_expansion)
+                cross_cik_graph_payload["foreign_contract_graphs"] = foreign_payload["graphs"]
+                cross_cik_graph_payload["foreign_contract_warnings"] = foreign_payload["warnings"]
+                warnings.extend(foreign_expansion.warnings)
+
             warnings.extend(cross_expanded.cross_cik_graph.warnings)
         else:
             instrument_packet = expanded.packet
@@ -343,6 +367,13 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
     entity_roles = cross_graph.get("entity_roles", []) if isinstance(cross_graph, dict) else []
     entity_relations = cross_graph.get("entity_relations", []) if isinstance(cross_graph, dict) else []
     cross_name_graphs = cross_graph.get("legal_name_alias_graphs", []) if isinstance(cross_graph, dict) else []
+    foreign_contract_graphs = cross_graph.get("foreign_contract_graphs", []) if isinstance(cross_graph, dict) else []
+    foreign_contract_resolved = sum(
+        1
+        for item in foreign_contract_graphs
+        for edge in (item.get("graph") or {}).get("edges", [])
+        if edge.get("status") == "resolved_by_contract_identity"
+    )
     lines = [
         f"# {bundle.company_name} ({bundle.ticker or 'CIK'}) research workspace",
         "",
@@ -360,6 +391,7 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
         f"- Incorporation/reference graph edges: {len(graph_edges)} ({resolved_edges} resolved)",
         f"- Cross-CIK SEC resolutions: {len(cross_resolutions)} ({resolved_cross} resolved)",
         f"- Cross-CIK legal-name graphs frozen: {len(cross_name_graphs)}",
+        f"- Foreign-CIK contract graphs: {len(foreign_contract_graphs)} ({foreign_contract_resolved} locator-less contracts resolved)",
         f"- Explicit legal-entity graph: {len(entity_nodes)} entities / {len(entity_roles)} roles / {len(entity_relations)} relations",
         f"- Cutoff share price: {draft.get('capital_structure', {}).get('current_price')}",
         "",
@@ -368,7 +400,7 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
         "1. Review `legal_name_alias_graph.json`; only cutoff-safe SEC rename evidence can bridge legal names.",
         "2. Review filing-to-filing capital-stack changes against source filings.",
         "3. Review the source-document graph; inspect unresolved/ambiguous locator and contract-identity edges.",
-        "4. Review `cross_cik_graph.json`; foreign CIK traversal and its legal-name graphs must come from explicit SEC CIK identity.",
+        "4. Review `cross_cik_graph.json`; explicit foreign CIK traversal, foreign legal-name graphs, and foreign locator-less contract edges are frozen separately.",
         "5. Review `debt_instrument_template.json`; verify/delete candidate fields against cited exhibit spans.",
         "6. Feed verified snapshots to `distressed-equity-debt-ledger` for stable instrument identity and amendment tracking.",
         "7. Have screening agents return the supplied structured result templates.",
