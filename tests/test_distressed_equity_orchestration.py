@@ -1,7 +1,10 @@
 from datetime import date
 
+import pytest
+
 from distressed_equity.market import PricePoint, SecurityIdentity
 from distressed_equity.orchestration import build_research_bundle, render_research_summary
+from distressed_equity.orchestration_cli import _bundle_from_frozen_packet
 from distressed_equity.sec import SecFiling, SecPointInTimeSnapshot
 
 
@@ -124,3 +127,15 @@ def test_summary_makes_resume_path_explicit():
     summary = render_research_summary(bundle)
     assert "distressed-equity-covenant" in summary
     assert "structured result templates" in summary
+
+
+def test_frozen_packet_refuses_a_different_cutoff():
+    bundle = build_research_bundle(
+        FakeSecClient(),
+        ticker="TEST",
+        analysis_date=date(2022, 12, 31),
+    )
+    restored = _bundle_from_frozen_packet(bundle.packet, date(2022, 12, 31))
+    assert restored.company_name == "Test Co"
+    with pytest.raises(ValueError, match="does not match requested"):
+        _bundle_from_frozen_packet(bundle.packet, date(2023, 1, 31))
