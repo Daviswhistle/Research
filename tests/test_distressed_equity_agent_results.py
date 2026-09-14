@@ -199,11 +199,57 @@ def test_valid_results_can_close_required_screening_fields():
     assert report.ready_for_screening is True
     assert report.screening_candidate_draft["capital_structure"]["current_price"] == 2.0
     assert report.screening_candidate_draft["base_scenario"]["enterprise_value"] == 900.0
+    assert {record.evidence_id for record in report.evidence} == {
+        "historical_market_reconstructor:e1",
+        "impairment_and_normalization_researcher:e1",
+    }
 
     candidate = screening_candidate_from_dict(report.screening_candidate_draft)
     screened = screen_candidate(candidate)
     assert screened.base_equity_multiple == 4.0
     assert screened.priority in {"RESEARCH", "DROP", "DEEP_DIVE_CANDIDATE"}
+
+
+def test_empty_debt_schedule_is_treated_as_unset_not_conflict():
+    item = result(
+        "capital_stack_extractor",
+        [
+            {
+                "path": "debt_obligations",
+                "value": [
+                    {
+                        "name": "2027 notes",
+                        "amount": 500.0,
+                        "due_month": 54,
+                        "refinancing_required": True,
+                    }
+                ],
+                "evidence_refs": ["e1"],
+                "confidence": "high",
+            }
+        ],
+    )
+    report = ingest_agent_results(packet(), [item])
+    assert report.conflicts == ()
+    assert report.screening_candidate_draft["debt_obligations"][0]["name"] == "2027 notes"
+
+
+def test_negative_monthly_cash_burn_represents_cash_generation():
+    item = result(
+        "impairment_and_normalization_researcher",
+        [
+            {
+                "path": "monthly_cash_burn",
+                "value": -5.0,
+                "evidence_refs": ["e1"],
+                "confidence": "medium",
+            }
+        ],
+    )
+    validation = validate_agent_result(item, expected_analysis_date=date(2022, 12, 31))
+    assert validation.valid is True
+    report = ingest_agent_results(packet(), [item])
+    assert report.screening_candidate_draft["monthly_cash_burn"] == -5.0
 
 
 def test_patch_requires_evidence_reference():
