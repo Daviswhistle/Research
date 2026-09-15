@@ -24,8 +24,10 @@ class CsvMarketProvider:
 
     securities CSV required columns:
       security_id,symbol,name
-    optional:
-      exchange,asset_type,start_date,end_date,status
+    optional for parsing, but required for survivorship-safe replay claims:
+      start_date,end_date
+    other optional columns:
+      exchange,asset_type,status
 
     prices CSV required columns:
       security_id,date,close
@@ -41,6 +43,7 @@ class CsvMarketProvider:
     def __init__(self, securities_csv: str | Path, prices_csv: str | Path) -> None:
         self.securities_csv = Path(securities_csv)
         self.prices_csv = Path(prices_csv)
+        self.survivorship_safe_universe = False
         self._securities = self._load_securities()
         self._prices, self._raw_prices = self._load_prices()
 
@@ -48,9 +51,11 @@ class CsvMarketProvider:
         rows: list[SecurityIdentity] = []
         with self.securities_csv.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
+            fieldnames = set(reader.fieldnames or [])
             required = {"security_id", "symbol", "name"}
-            if not required.issubset(reader.fieldnames or []):
+            if not required.issubset(fieldnames):
                 raise ValueError(f"securities CSV must include {sorted(required)}")
+            self.survivorship_safe_universe = {"start_date", "end_date"}.issubset(fieldnames)
             for raw in reader:
                 security_id = (raw.get("security_id") or "").strip()
                 symbol = (raw.get("symbol") or "").strip()
