@@ -12,7 +12,7 @@ from .structured_debt_extraction import _header_field, _row_text, _table_row_pro
 
 _MAX_PDF_BYTES = 25_000_000
 _MIN_NATIVE_TEXT_CHARS = 80
-_MIN_NATIVE_FRAGMENTS = 6
+_MIN_NATIVE_FRAGMENTS = 2
 
 
 @dataclass(frozen=True)
@@ -107,8 +107,6 @@ def extract_pdf_text_fragments(pdf_bytes: bytes) -> tuple[PdfTextFragment, ...]:
             )
 
         page.extract_text(visitor_text=visitor_text)
-        # Exact duplicate text-show operations occur in some PDFs because of
-        # clipping/layering. Preserve first occurrence only at the same location.
         seen: set[tuple[float, float, str]] = set()
         for item in sorted(page_fragments, key=lambda value: (-value.y, value.x, value.text)):
             key = (round(item.x, 1), round(item.y, 1), item.text)
