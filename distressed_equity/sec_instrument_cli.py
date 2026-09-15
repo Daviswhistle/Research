@@ -19,7 +19,7 @@ from .legal_name_alias import (
     build_legal_name_alias_graphs,
     legal_name_alias_graph_to_dict,
 )
-from .named_entity_closure import close_named_entity_cross_cik
+from .named_entity_closure import close_named_entity_fixed_point
 from .named_entity_contracts import (
     named_entity_contract_graph_to_dict,
     resolve_named_entity_contracts,
@@ -206,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
             foreign_expansion = None
+            named_fixed_point_iterations = None
             if not args.no_contract_identity_fallback:
                 foreign_expansion = expand_foreign_contract_identities(
                     client,
@@ -221,14 +222,15 @@ def main(argv: list[str] | None = None) -> int:
                 cross_expanded = foreign_expansion.cross_expanded
                 packet = cross_expanded.packet
 
+                named_sources = _named_source_nodes(
+                    expanded.graph.nodes,
+                    foreign_expansion.graphs,
+                    args.reference_depth,
+                )
                 named_expansion = resolve_named_entity_contracts(
                     client,
                     packet=packet,
-                    source_nodes=_named_source_nodes(
-                        expanded.graph.nodes,
-                        foreign_expansion.graphs,
-                        args.reference_depth,
-                    ),
+                    source_nodes=named_sources,
                     root_cik=snapshot.cik,
                     known_legal_name_graphs=legal_graphs,
                     max_contract_search_filings=args.contract_search_max_filings,
@@ -236,13 +238,12 @@ def main(argv: list[str] | None = None) -> int:
                     contract_days_after_execution=args.contract_days_after_execution,
                     max_candidates_per_exhibit=args.max_candidates_per_exhibit,
                 )
-                packet = named_expansion.packet
-                named_entity_payload = named_entity_contract_graph_to_dict(named_expansion.graph)
 
-                named_closure = close_named_entity_cross_cik(
+                named_fixed = close_named_entity_fixed_point(
                     client,
                     cross_expanded=cross_expanded,
                     named_expansion=named_expansion,
+                    initial_source_nodes=named_sources,
                     legal_name_graphs=legal_graphs,
                     existing_foreign_expansion=foreign_expansion,
                     max_depth=args.reference_depth,
@@ -252,15 +253,23 @@ def main(argv: list[str] | None = None) -> int:
                     contract_days_after_execution=args.contract_days_after_execution,
                     max_candidates_per_exhibit=args.max_candidates_per_exhibit,
                 )
-                cross_expanded = named_closure.cross_expanded
+                cross_expanded = named_fixed.cross_expanded
                 packet = cross_expanded.packet
-                legal_graphs = tuple(named_closure.legal_name_graphs)
-                foreign_expansion = named_closure.foreign_expansion
+                legal_graphs = tuple(named_fixed.legal_name_graphs)
+                foreign_expansion = named_fixed.foreign_expansion
+                named_entity_payload = named_entity_contract_graph_to_dict(
+                    named_fixed.named_expansion.graph
+                )
+                named_fixed_point_iterations = named_fixed.iterations
 
             cross_cik_payload = cross_cik_graph_to_dict(cross_expanded.cross_cik_graph)
             cross_cik_payload["legal_name_alias_graphs"] = [
                 legal_name_alias_graph_to_dict(item) for item in legal_graphs
             ]
+            if named_fixed_point_iterations is not None:
+                cross_cik_payload["named_entity_fixed_point_iterations"] = (
+                    named_fixed_point_iterations
+                )
             if legal_warnings:
                 cross_cik_payload.setdefault("warnings", []).extend(legal_warnings)
             if foreign_expansion is not None:
