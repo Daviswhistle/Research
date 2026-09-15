@@ -251,6 +251,7 @@ def resolve_named_entity_contracts(
                         client,
                         cik=candidate_cik,
                         analysis_date=source.filing_date,
+                        required_aliases=(party.normalized_name,),
                     )
                 except Exception as exc:
                     warnings.append(
