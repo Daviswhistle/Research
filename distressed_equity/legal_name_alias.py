@@ -1,11 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime
 from typing import Any, Iterable
 
 from .contract_parties import normalize_party_name
 from .sec import SEC_DATA_BASE, SecClient, normalize_cik
+
+
+HEADER_FORMS = (
+    "10-K", "10-K/A", "10-Q", "10-Q/A", "8-K", "8-K/A",
+    "S-1", "S-1/A", "S-3", "S-3/A", "S-4", "S-4/A",
+)
+DEFAULT_HEADER_RECENT_LIMIT = 3
+DEFAULT_HEADER_MAX_FILINGS = 12
 
 
 @dataclass(frozen=True)
@@ -193,17 +201,211 @@ def build_legal_name_alias_graph_from_submissions(
     )
 
 
+def _evidence_aliases(evidence) -> set[str]:
+    aliases: set[str] = set()
+    for item in evidence:
+        if item.normalized_current_name:
+            aliases.add(item.normalized_current_name)
+        aliases.update(former.normalized_name for former in item.former_names if former.normalized_name)
+    return aliases
+
+
+def _evidence_current_names(evidence) -> set[str]:
+    return {item.normalized_current_name for item in evidence if item.normalized_current_name}
+
+
+def _temporal_probe_indices(total: int, recent_count: int) -> tuple[int, ...]:
+    """Return broad historical anchors: oldest first, then recursive midpoints."""
+    if total <= recent_count:
+        return ()
+    left = max(recent_count - 1, 0)
+    right = total - 1
+    order: list[int] = [right]
+    queue: list[tuple[int, int]] = [(left, right)]
+    seen = {right}
+    while queue:
+        lo, hi = queue.pop(0)
+        if hi - lo <= 1:
+            continue
+        mid = (lo + hi) // 2
+        if mid >= recent_count and mid not in seen:
+            order.append(mid)
+            seen.add(mid)
+        queue.append((lo, mid))
+        queue.append((mid, hi))
+    return tuple(order)
+
+
+def _recent_headers_sufficient(
+    base: LegalNameAliasGraph,
+    evidence,
+    *,
+    older_exists: bool,
+    required_aliases: set[str],
+) -> bool:
+    aliases = _evidence_aliases(evidence)
+    combined = aliases | set(base.alias_names)
+    if required_aliases:
+        return required_aliases.issubset(combined)
+    if not older_exists:
+        return True
+    if not evidence:
+        return False
+    current_names = _evidence_current_names(evidence)
+    if len(current_names) > 1:
+        return False
+    base_aliases = set(base.alias_names)
+    header_only = aliases - base_aliases
+    if header_only:
+        return False
+    # If submissions already carries a real rename history and recent headers
+    # corroborate every known alias, deeper requests add little identity value.
+    if len(base_aliases) > 1 and base_aliases.issubset(aliases):
+        return True
+    # A current-name-only submissions graph cannot prove that a much older alias
+    # never existed. Probe at least the oldest available filing before stopping.
+    return False
+
+
+def _adaptive_complete_header_evidence(
+    client: SecClient,
+    *,
+    cik10: str,
+    analysis_date: date,
+    base: LegalNameAliasGraph,
+    filings,
+    required_aliases: set[str],
+    recent_limit: int,
+    max_filings: int,
+    deep_scan: bool,
+):
+    from .legal_name_header import fetch_complete_submission_name_evidence
+
+    candidates = tuple(
+        sorted(
+            (
+                filing for filing in filings
+                if normalize_cik(filing.cik) == cik10 and filing.filing_date <= analysis_date
+            ),
+            key=lambda filing: (filing.filing_date, filing.accession_number),
+            reverse=True,
+        )
+    )
+    if not candidates or max_filings == 0:
+        return (), (), "no_header_scan", len(candidates)
+
+    effective_recent = min(recent_limit, max_filings, len(candidates))
+    evidence = []
+    warnings: list[str] = []
+    attempted: set[str] = set()
+
+    def fetch(filing) -> None:
+        if filing.accession_number in attempted:
+            return
+        attempted.add(filing.accession_number)
+        try:
+            evidence.append(
+                fetch_complete_submission_name_evidence(
+                    client,
+                    filing=filing,
+                    target_cik=cik10,
+                )
+            )
+        except Exception as exc:
+            warnings.append(
+                f"failed complete-submission legal-name header lookup for {filing.accession_number}: {exc}"
+            )
+
+    for filing in candidates[:effective_recent]:
+        fetch(filing)
+
+    combined = _evidence_aliases(evidence) | set(base.alias_names)
+    if required_aliases and required_aliases.issubset(combined):
+        return tuple(evidence), tuple(warnings), "target_alias_satisfied_recent", len(candidates)
+
+    older_exists = len(candidates) > effective_recent
+    if not deep_scan or _recent_headers_sufficient(
+        base,
+        evidence,
+        older_exists=older_exists,
+        required_aliases=required_aliases,
+    ):
+        status = "recent_only_sufficient" if deep_scan else "recent_only_deep_scan_disabled"
+        return tuple(evidence), tuple(warnings), status, len(candidates)
+
+    recent_aliases = _evidence_aliases(evidence) | set(base.alias_names)
+    recent_currents = _evidence_current_names(evidence)
+    probes = _temporal_probe_indices(len(candidates), effective_recent)
+    if not probes:
+        return tuple(evidence), tuple(warnings), "recent_only_complete", len(candidates)
+
+    # First fetch the oldest available filing. For an untargeted scan, equal
+    # endpoint identity with no new aliases is a conservative low-cost stop.
+    fetch(candidates[probes[0]])
+    combined = _evidence_aliases(evidence) | set(base.alias_names)
+    if required_aliases and required_aliases.issubset(combined):
+        return tuple(evidence), tuple(warnings), "target_alias_found_deep", len(candidates)
+    oldest_evidence = next(
+        (item for item in evidence if item.accession_number == candidates[probes[0]].accession_number),
+        None,
+    )
+    if not required_aliases and oldest_evidence is not None:
+        oldest_current = oldest_evidence.normalized_current_name
+        no_new_alias = combined.issubset(recent_aliases)
+        same_endpoint = bool(oldest_current and recent_currents and oldest_current in recent_currents)
+        if no_new_alias and same_endpoint:
+            return tuple(evidence), tuple(warnings), "deep_probe_stable_endpoints", len(candidates)
+
+    # Evidence changed, or a specifically required historical alias remains
+    # missing. Spread the remaining request budget over the whole filing history
+    # using recursive temporal midpoints rather than walking quarter-by-quarter.
+    for index in probes[1:]:
+        if len(attempted) >= max_filings:
+            break
+        fetch(candidates[index])
+        combined = _evidence_aliases(evidence) | set(base.alias_names)
+        if required_aliases and required_aliases.issubset(combined):
+            return tuple(evidence), tuple(warnings), "target_alias_found_deep", len(candidates)
+
+    complete = len(attempted) >= len(candidates)
+    if required_aliases and not required_aliases.issubset(
+        _evidence_aliases(evidence) | set(base.alias_names)
+    ):
+        missing = ", ".join(sorted(required_aliases - (_evidence_aliases(evidence) | set(base.alias_names))))
+        warnings.append(
+            f"required historical legal-name aliases were not confirmed by the bounded header scan: {missing}"
+        )
+    if complete:
+        return tuple(evidence), tuple(warnings), "deep_scan_complete", len(candidates)
+    warnings.append(
+        f"historical legal-name header scan reached max_header_filings={max_filings}; older/intermediate alias history may remain incomplete"
+    )
+    return tuple(evidence), tuple(warnings), "deep_scan_bounded", len(candidates)
+
+
 def build_legal_name_alias_graph(
     client: SecClient,
     *,
     cik: str | int,
     analysis_date: date,
+    required_aliases: Iterable[str] = (),
+    header_recent_limit: int = DEFAULT_HEADER_RECENT_LIMIT,
+    header_max_filings: int = DEFAULT_HEADER_MAX_FILINGS,
+    deep_scan_headers: bool = True,
 ):
     """Build submissions metadata and reconcile it with historical SEC headers.
 
-    Complete-submission headers are primary historical observations. Header lookup
-    is best-effort: an unavailable header never invalidates the submissions graph.
+    The latest headers are fetched first. If they do not sufficiently corroborate
+    known submissions history—or a caller requires a specific historical alias
+    that is still unconfirmed—the builder performs a bounded temporal deep scan.
+    The deep scan probes the oldest filing first and then recursive temporal
+    midpoints, avoiding an expensive quarter-by-quarter walk through long histories.
     """
+
+    if header_recent_limit < 0:
+        raise ValueError("header_recent_limit cannot be negative")
+    if header_max_filings < 0:
+        raise ValueError("header_max_filings cannot be negative")
 
     cik10 = normalize_cik(cik)
     base = build_legal_name_alias_graph_from_submissions(
@@ -215,48 +417,41 @@ def build_legal_name_alias_graph(
         filings = client.filings_as_of(
             cik10,
             analysis_date,
-            forms=("10-K", "10-K/A", "10-Q", "10-Q/A", "8-K", "8-K/A", "S-1", "S-1/A", "S-3", "S-3/A", "S-4", "S-4/A"),
+            forms=HEADER_FORMS,
         )
-    except Exception:
-        return base
+    except Exception as exc:
+        return replace(
+            base,
+            warnings=tuple(dict.fromkeys(base.warnings + (f"failed historical filing lookup for legal-name headers: {exc}",))),
+        )
 
-    from .legal_name_header import fetch_complete_submission_name_evidence
     from .legal_name_reconcile import reconcile_legal_name_sources
 
-    evidence = []
-    lookup_warnings: list[str] = []
-    selected = sorted(
-        (filing for filing in filings if filing.filing_date <= analysis_date),
-        key=lambda filing: (filing.filing_date, filing.accession_number),
-        reverse=True,
-    )[:3]
-    for filing in selected:
-        try:
-            evidence.append(
-                fetch_complete_submission_name_evidence(
-                    client,
-                    filing=filing,
-                    target_cik=cik10,
-                )
-            )
-        except Exception as exc:
-            lookup_warnings.append(
-                f"failed complete-submission legal-name header lookup for {filing.accession_number}: {exc}"
-            )
-
+    required = {
+        normalized
+        for value in required_aliases
+        if (normalized := normalize_party_name(str(value)))
+    }
+    evidence, lookup_warnings, scan_status, considered = _adaptive_complete_header_evidence(
+        client,
+        cik10=cik10,
+        analysis_date=analysis_date,
+        base=base,
+        filings=filings,
+        required_aliases=required,
+        recent_limit=header_recent_limit,
+        max_filings=header_max_filings,
+        deep_scan=deep_scan_headers,
+    )
     reconciled = reconcile_legal_name_sources(base, evidence)
-    if not lookup_warnings:
-        return reconciled
-    return type(reconciled)(
-        cik=reconciled.cik,
-        analysis_date=reconciled.analysis_date,
-        canonical_name_as_of=reconciled.canonical_name_as_of,
-        canonical_status=reconciled.canonical_status,
-        records=reconciled.records,
-        transitions=reconciled.transitions,
-        comparisons=reconciled.comparisons,
-        header_evidence=reconciled.header_evidence,
-        warnings=tuple(dict.fromkeys(list(reconciled.warnings) + lookup_warnings)),
+    warnings = tuple(dict.fromkeys(list(reconciled.warnings) + list(lookup_warnings)))
+    return replace(
+        reconciled,
+        warnings=warnings,
+        header_scan_status=scan_status,
+        header_scan_filings_considered=considered,
+        header_scan_filings_fetched=len(evidence),
+        header_scan_oldest_filing_on=min((item.filing_date for item in evidence), default=None),
     )
 
 
