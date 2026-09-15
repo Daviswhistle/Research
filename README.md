@@ -161,6 +161,8 @@ distressed-equity-sec-debt \
 
 정규식으로 찾은 금액·연도·금리는 **후보**일 뿐 자동 debt schedule로 승격하지 않습니다. Filing-to-filing diff도 confirmed amendment가 아니라 금액/만기/비율 신호가 바뀐 위치를 알려주는 탐색 도구입니다.
 
+SEC exhibit 안에서 동일 debt instrument의 title, principal, maturity, CUSIP/ISIN 등이 멀리 떨어져 나타날 수 있으므로 source span을 먼저 보존한 뒤 **같은 exhibit 내부에서만** 보수적으로 evidence clustering을 수행합니다. 명시 identifier·maturity·note series·instrument family 충돌은 hard split이며, generic `Credit Agreement`나 `Indenture`라는 이유만으로 서로 다른 instruments를 합치지 않습니다. Multi-span candidate는 계속 verification 대상이지 authoritative debt row가 아닙니다. 자세한 규칙은 [`docs/DEBT_EVIDENCE_CLUSTERING.md`](docs/DEBT_EVIDENCE_CLUSTERING.md)를 참고하세요.
+
 ### Stable debt instrument ledger
 
 Filing마다 이름이 조금씩 달라지는 동일 채무를 추적하기 위해 instrument-level stable ID 레이어를 둡니다.
