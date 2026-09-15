@@ -27,6 +27,7 @@ from .legal_name_alias import (
     legal_name_alias_graph_to_dict,
 )
 from .market import HistoricalMarketProvider, market_snapshot
+from .named_entity_closure import close_named_entity_cross_cik
 from .named_entity_contracts import (
     named_entity_contract_graph_to_dict,
     resolve_named_entity_contracts,
@@ -251,7 +252,6 @@ def build_research_bundle(
                 max_candidates_per_exhibit=max_instrument_candidates_per_exhibit,
             )
             instrument_packet = cross_expanded.packet
-            cross_cik_graph_payload = cross_cik_graph_to_dict(cross_expanded.cross_cik_graph)
             encountered_ciks = {
                 item.cik for item in cross_expanded.cross_cik_graph.entity_nodes
             } | {
@@ -263,9 +263,6 @@ def build_research_bundle(
                 analysis_date=analysis_date,
                 existing=(legal_name_graph,),
             )
-            cross_cik_graph_payload["legal_name_alias_graphs"] = [
-                legal_name_alias_graph_to_dict(item) for item in legal_graphs
-            ]
             warnings.extend(legal_graph_warnings)
 
             foreign_expansion = None
@@ -283,9 +280,6 @@ def build_research_bundle(
                 )
                 cross_expanded = foreign_expansion.cross_expanded
                 instrument_packet = cross_expanded.packet
-                foreign_payload = foreign_contract_expansion_to_dict(foreign_expansion)
-                cross_cik_graph_payload["foreign_contract_graphs"] = foreign_payload["graphs"]
-                cross_cik_graph_payload["foreign_contract_warnings"] = foreign_payload["warnings"]
                 warnings.extend(foreign_expansion.warnings)
 
                 named_sources = _named_entity_source_nodes(
@@ -308,11 +302,41 @@ def build_research_bundle(
                 named_entity_contract_graph_payload = named_entity_contract_graph_to_dict(
                     named_expansion.graph
                 )
+                warnings.extend(named_expansion.graph.warnings)
+
+                named_closure = close_named_entity_cross_cik(
+                    sec_client,
+                    cross_expanded=cross_expanded,
+                    named_expansion=named_expansion,
+                    legal_name_graphs=legal_graphs,
+                    existing_foreign_expansion=foreign_expansion,
+                    max_depth=reference_depth,
+                    max_nodes=cross_cik_max_nodes,
+                    max_contract_search_filings=contract_search_max_filings,
+                    contract_days_before_execution=contract_days_before_execution,
+                    contract_days_after_execution=contract_days_after_execution,
+                    max_candidates_per_exhibit=max_instrument_candidates_per_exhibit,
+                )
+                cross_expanded = named_closure.cross_expanded
+                instrument_packet = cross_expanded.packet
+                legal_graphs = tuple(named_closure.legal_name_graphs)
+                foreign_expansion = named_closure.foreign_expansion
+                warnings.extend(named_closure.warnings)
+
+            # Serialize only after all foreign and named-entity closure passes so
+            # top-level resolutions/entities/documents match the final packet.
+            cross_cik_graph_payload = cross_cik_graph_to_dict(cross_expanded.cross_cik_graph)
+            cross_cik_graph_payload["legal_name_alias_graphs"] = [
+                legal_name_alias_graph_to_dict(item) for item in legal_graphs
+            ]
+            if foreign_expansion is not None:
+                foreign_payload = foreign_contract_expansion_to_dict(foreign_expansion)
+                cross_cik_graph_payload["foreign_contract_graphs"] = foreign_payload["graphs"]
+                cross_cik_graph_payload["foreign_contract_warnings"] = foreign_payload["warnings"]
+            if named_entity_contract_graph_payload is not None:
                 cross_cik_graph_payload["named_entity_contract_graph"] = (
                     named_entity_contract_graph_payload
                 )
-                warnings.extend(named_expansion.graph.warnings)
-
             warnings.extend(cross_expanded.cross_cik_graph.warnings)
         else:
             instrument_packet = expanded.packet
