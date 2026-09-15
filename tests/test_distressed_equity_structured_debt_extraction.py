@@ -146,7 +146,7 @@ class VisualSession:
                 </table></body></html>
                 """
             )
-        raise AssertionError(f"binary PDF should not be fetched as text: {url}")
+        raise AssertionError(f"fixture does not provide PDF bytes: {url}")
 
 
 class VisualClient:
@@ -159,7 +159,7 @@ class VisualClient:
         return None
 
 
-def test_pdf_debt_exhibit_is_deferred_instead_of_decoded_as_text():
+def test_pdf_without_usable_binary_fixture_remains_deferred_after_native_probe():
     filing = SecFiling(
         cik="0000000001",
         accession_number="0000000001-22-000001",
@@ -185,7 +185,13 @@ def test_pdf_debt_exhibit_is_deferred_instead_of_decoded_as_text():
         and "document=notes.pdf" in warning
         for warning in packet.warnings
     )
-    assert client.session.requested == [index_url]
+    assert any(
+        warning.startswith("PDF_NATIVE_TEXT_EXTRACTION_FAILED|")
+        and "document=notes.pdf" in warning
+        for warning in packet.warnings
+    )
+    pdf_url = index_url.rsplit("/", 1)[0] + "/notes.pdf"
+    assert client.session.requested == [index_url, pdf_url]
 
 
 class ImageHeavySession:
