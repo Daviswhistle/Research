@@ -19,6 +19,7 @@ from .legal_name_alias import (
     build_legal_name_alias_graphs,
     legal_name_alias_graph_to_dict,
 )
+from .named_entity_closure import close_named_entity_cross_cik
 from .named_entity_contracts import (
     named_entity_contract_graph_to_dict,
     resolve_named_entity_contracts,
@@ -146,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     packet = build_sec_instrument_packet(
         client,
         ticker=snapshot.ticker,
-        company_name=snapshot.company_name,
+        company_name=(legal_name_graph.canonical_name_as_of or snapshot.cik),
         analysis_date=cutoff,
         filings=snapshot.filings,
         filing_limit=args.filing_limit,
@@ -192,7 +193,6 @@ def main(argv: list[str] | None = None) -> int:
                 max_candidates_per_exhibit=args.max_candidates_per_exhibit,
             )
             packet = cross_expanded.packet
-            cross_cik_payload = cross_cik_graph_to_dict(cross_expanded.cross_cik_graph)
             encountered_ciks = {
                 item.cik for item in cross_expanded.cross_cik_graph.entity_nodes
             } | {
@@ -204,12 +204,8 @@ def main(argv: list[str] | None = None) -> int:
                 analysis_date=cutoff,
                 existing=(legal_name_graph,),
             )
-            cross_cik_payload["legal_name_alias_graphs"] = [
-                legal_name_alias_graph_to_dict(item) for item in legal_graphs
-            ]
-            if legal_warnings:
-                cross_cik_payload.setdefault("warnings", []).extend(legal_warnings)
 
+            foreign_expansion = None
             if not args.no_contract_identity_fallback:
                 foreign_expansion = expand_foreign_contract_identities(
                     client,
@@ -224,9 +220,6 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 cross_expanded = foreign_expansion.cross_expanded
                 packet = cross_expanded.packet
-                foreign_payload = foreign_contract_expansion_to_dict(foreign_expansion)
-                cross_cik_payload["foreign_contract_graphs"] = foreign_payload["graphs"]
-                cross_cik_payload["foreign_contract_warnings"] = foreign_payload["warnings"]
 
                 named_expansion = resolve_named_entity_contracts(
                     client,
@@ -245,6 +238,36 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 packet = named_expansion.packet
                 named_entity_payload = named_entity_contract_graph_to_dict(named_expansion.graph)
+
+                named_closure = close_named_entity_cross_cik(
+                    client,
+                    cross_expanded=cross_expanded,
+                    named_expansion=named_expansion,
+                    legal_name_graphs=legal_graphs,
+                    existing_foreign_expansion=foreign_expansion,
+                    max_depth=args.reference_depth,
+                    max_nodes=args.cross_cik_max_nodes,
+                    max_contract_search_filings=args.contract_search_max_filings,
+                    contract_days_before_execution=args.contract_days_before_execution,
+                    contract_days_after_execution=args.contract_days_after_execution,
+                    max_candidates_per_exhibit=args.max_candidates_per_exhibit,
+                )
+                cross_expanded = named_closure.cross_expanded
+                packet = cross_expanded.packet
+                legal_graphs = tuple(named_closure.legal_name_graphs)
+                foreign_expansion = named_closure.foreign_expansion
+
+            cross_cik_payload = cross_cik_graph_to_dict(cross_expanded.cross_cik_graph)
+            cross_cik_payload["legal_name_alias_graphs"] = [
+                legal_name_alias_graph_to_dict(item) for item in legal_graphs
+            ]
+            if legal_warnings:
+                cross_cik_payload.setdefault("warnings", []).extend(legal_warnings)
+            if foreign_expansion is not None:
+                foreign_payload = foreign_contract_expansion_to_dict(foreign_expansion)
+                cross_cik_payload["foreign_contract_graphs"] = foreign_payload["graphs"]
+                cross_cik_payload["foreign_contract_warnings"] = foreign_payload["warnings"]
+            if named_entity_payload is not None:
                 cross_cik_payload["named_entity_contract_graph"] = named_entity_payload
         else:
             packet = expanded.packet
@@ -264,7 +287,7 @@ def main(argv: list[str] | None = None) -> int:
             args.task_output,
             {
                 "ticker": snapshot.ticker,
-                "company_name": snapshot.company_name,
+                "company_name": (legal_name_graph.canonical_name_as_of or snapshot.cik),
                 "analysis_date": cutoff.isoformat(),
                 "task": _jsonable(asdict(build_instrument_verification_task(packet))),
             },
