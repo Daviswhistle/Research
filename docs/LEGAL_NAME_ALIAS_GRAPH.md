@@ -30,8 +30,6 @@ same CIK
 https://data.sec.gov/submissions/CIK##########.json
 ```
 
-SEC는 이 구조에 current name과 former name 같은 filer metadata가 포함된다고 설명한다.
-
 추가 point-in-time source로 cutoff 이전 filing의 **Complete submission text file** `<SEC-HEADER>`를 사용한다.
 
 ```text
@@ -47,9 +45,7 @@ FORMER CONFORMED NAME
 DATE OF NAME CHANGE
 ```
 
-CIK는 filer에 부여되는 고유 식별자이므로 이름 변경 전후 identity의 deterministic anchor로 사용한다.
-
-중요: submissions의 `formerNames.from/to`와 header의 `DATE OF NAME CHANGE`를 주법상 법적 이름변경 효력일로 단정하지 않는다. 이 날짜들은 이 연구 파이프라인에서 **SEC identity metadata의 시간 경계**로만 사용한다.
+CIK는 filer에 부여되는 identity anchor로 사용한다. submissions의 `formerNames.from/to`와 header의 `DATE OF NAME CHANGE`를 주법상 법적 이름변경 효력일로 단정하지 않고, 이 파이프라인의 **SEC identity metadata 시간 경계**로만 사용한다.
 
 ## Datamodel
 
@@ -87,7 +83,13 @@ transitions
 comparisons
 header_evidence
 warnings
+header_scan_status
+header_scan_filings_considered
+header_scan_filings_fetched
+header_scan_oldest_filing_on
 ```
+
+마지막 네 필드는 historical complete-header scan이 실제로 얼마나 깊게 수행됐는지 frozen provenance로 남긴다.
 
 ## Historical cutoff guard
 
@@ -101,39 +103,11 @@ former: Facebook Inc.
 former.to: 2021-10-27
 ```
 
-### cutoff = 2020-12-31
+cutoff가 2020-12-31이면 `Facebook Inc.`만 허용하고 미래 `Meta Platforms, Inc.` alias를 넣지 않는다. cutoff가 2022-12-31이면 rename boundary가 cutoff 이전이므로 두 이름을 같은 CIK의 cutoff-safe alias로 사용할 수 있다.
 
-허용:
+## Complete-header reconciliation
 
-```text
-canonical_name_as_of = Facebook Inc.
-alias set = {facebook inc}
-```
-
-금지:
-
-```text
-facebook inc == meta platforms inc
-```
-
-2020년 분석에 2021년 이후 rename을 넣으면 hindsight다.
-
-### cutoff = 2022-12-31
-
-rename boundary가 cutoff 이전이므로:
-
-```text
-alias set = {
-  facebook inc,
-  meta platforms inc
-}
-```
-
-가 허용된다.
-
-## Complete-header fallback
-
-submissions `formerNames`가 비어 있거나 current name의 역사적 유효시점을 설명하지 못하는 경우 complete-submission header를 fallback으로 사용한다.
+submissions `formerNames`가 비어 있거나 current name의 역사적 유효시점을 설명하지 못하는 경우 complete-submission header를 사용한다.
 
 예:
 
@@ -151,9 +125,132 @@ canonical_name_as_of = Historical Name Inc.
 canonical_status = conflict_header_preferred
 ```
 
-근거 없는 `Future Name Inc.`는 historical alias set에서도 제외한다.
+반대로 latest sampled header 이후 cutoff 이전에 날짜가 있는 submissions rename transition이 존재하면 그 더 최근 transition을 인정할 수 있다.
 
-반대로 latest sampled header 이후 cutoff 이전에 날짜가 있는 submissions rename transition이 존재하면 더 최근 transition을 인정할 수 있다.
+## Adaptive historical header deep scan
+
+기존 구현은 cutoff 이전 최신 filing 3개의 complete-submission header만 확인했다. 최근 header가 오래된 legal-name history를 싣지 않는 issuer에서는 과거 계약 party alias를 놓칠 수 있었다.
+
+현재 public builder는 다음 순서로 동작한다.
+
+```text
+SEC submissions history
+    ↓
+latest 3 complete-submission headers
+    ↓
+충분한가?
+    ├─ yes → stop
+    └─ no  → oldest filing probe
+                ↓
+             필요하면 temporal midpoint scan
+                ↓
+             max_header_filings bound
+```
+
+기본값:
+
+```text
+header_recent_limit = 3
+header_max_filings = 12
+deep_scan_headers = True
+```
+
+### Recent-only 즉시 종료
+
+recent headers가 submissions에 이미 기록된 rename history를 모두 corroborate하면 older filing을 추가 요청하지 않는다.
+
+예를 들어 submissions가 `{Old Name, New Name}`을 이미 가지고 있고 recent header도 두 이름을 모두 확인하면:
+
+```text
+header_scan_status = recent_only_sufficient
+```
+
+으로 종료한다.
+
+### Oldest filing probe
+
+submissions가 current name 하나만 갖고 있는데 훨씬 오래된 filing history가 존재하면 “옛 이름이 없었다”고 단정할 수 없다. 따라서 최소 한 번 oldest available filing의 header를 본다.
+
+latest와 oldest의 current name이 같고 새로운 alias도 발견되지 않은 일반 scan은:
+
+```text
+header_scan_status = deep_probe_stable_endpoints
+```
+
+로 종료할 수 있다. 이는 무제한 exhaustive scan이 아니라 bounded confidence probe다.
+
+### Temporal midpoint scan
+
+oldest probe에서 다른 이름이 발견되거나, 특정 historical alias를 반드시 확인해야 하는데 아직 찾지 못했다면 quarter-by-quarter로 내려가지 않는다.
+
+대신 전체 filing timeline에서:
+
+```text
+oldest
+midpoint
+quarter points
+...
+```
+
+처럼 recursive temporal midpoint를 선택한다. 긴 filing history에서 제한된 요청으로 시간축 전체를 넓게 덮기 위한 전략이다.
+
+최대 요청 수에 도달했는데 전체 history를 다 보지 못하면:
+
+```text
+header_scan_status = deep_scan_bounded
+```
+
+과 함께 다음 warning을 남긴다.
+
+```text
+older/intermediate alias history may remain incomplete
+```
+
+filing 수가 bound 이하라 전부 확인하면:
+
+```text
+header_scan_status = deep_scan_complete
+```
+
+이다.
+
+## Targeted historical-name confirmation
+
+일반 graph 구축보다 더 강한 경우가 있다. Named external-entity resolver는 source contract에 실제로 등장한 특정 법인명이 후보 CIK의 역사적 alias였는지를 확인해야 한다.
+
+이때 builder에:
+
+```python
+required_aliases=(party.normalized_name,)
+```
+
+를 전달한다.
+
+따라서 recent headers와 oldest header의 이름이 우연히 같더라도 필요한 과거 이름이 아직 확인되지 않았다면 stable-endpoint stop을 사용하지 않고 temporal midpoint scan을 계속한다.
+
+필요한 이름을 deep scan에서 찾으면:
+
+```text
+header_scan_status = target_alias_found_deep
+```
+
+이 된다.
+
+반대로 bounded scan이 끝날 때까지 못 찾으면 자동으로 이름을 추정하지 않고 warning을 남긴다. Candidate registry name 자체는 historical identity proof가 아니다.
+
+이 targeted scan은 다음 체인의 source-date confirmation에 직접 사용된다.
+
+```text
+name-only contract party
+    ↓
+SEC candidate CIK generation
+    ↓
+required historical alias deep scan
+    ↓
+source-date legal-name confirmation
+    ↓
+unique historical contract confirmation
+```
 
 ## Reconciliation states
 
@@ -177,47 +274,27 @@ canonical_status = conflict_header_preferred
 
 ## Multi-entity submission guard
 
-하나의 complete submission에는 filer, issuer, reporting owner, subject company가 함께 존재할 수 있다.
+하나의 complete submission에는 filer, issuer, reporting owner, subject company가 함께 존재할 수 있다. Header 전체의 former name을 합치지 않고 `CENTRAL INDEX KEY == target CIK`인 entity section만 사용한다.
 
-따라서 header 전체의 former name을 합치지 않는다.
+## Party / contract integration
 
-```text
-entity section
-    ↓
-CENTRAL INDEX KEY == target CIK
-    ↓
-그 section의 current/former name만 사용
-```
-
-다른 CIK의 이름은 alias graph에 들어올 수 없다.
-
-## Party matching integration
-
-기존 contract party matching은 role + normalized legal name을 hard filter로 사용한다.
-
-이제 source-backed alias group을 명시적으로 전달할 수 있다.
+Contract party matching은 role + normalized legal name을 hard filter로 사용한다. Source-backed alias graph가 있을 때만 old/new legal name을 bridge한다.
 
 ```text
 borrower: Facebook Inc.
 borrower: Meta Platforms, Inc.
 ```
 
-동일 CIK의 cutoff-safe alias graph가 둘을 연결하면 같은 borrower identity로 비교할 수 있다.
-
-하지만:
+은 동일 CIK alias evidence가 있으면 연결할 수 있지만:
 
 ```text
 borrower: Facebook Inc.
 guarantor: Meta Platforms, Inc.
 ```
 
-처럼 role이 다르면 alias여도 match하지 않는다.
+처럼 role이 다르면 match하지 않는다.
 
-또한 alias graph가 없으면 이름이 달라진 두 party는 match하지 않는다.
-
-## Contract identity integration
-
-Locator-less contract resolver의 identity는 계속 다음 구조다.
+Locator-less contract resolver도 계속 다음 조건을 모두 요구한다.
 
 ```text
 contract kind
@@ -226,41 +303,25 @@ contract kind
 + role-aware party identity
 ```
 
-법인명 rename은 party identity 비교에서만 bridge한다.
-
-다음 조건은 바뀌지 않는다.
-
-- contract kind가 달라지면 match하지 않는다.
-- execution date가 달라지면 match하지 않는다.
-- original agreement와 amended-and-restated agreement를 조용히 합치지 않는다.
-- amendment/waiver/supplement를 original agreement로 승격하지 않는다.
-- candidate가 source-specified party를 독립적으로 확인하지 못하면 match하지 않는다.
-
 ## Cross-CIK integration
 
-Cross-CIK resolver가 explicit SEC locator로 foreign CIK를 발견하면 그 CIK에 대해서도 같은 reconciled name-history builder를 사용한다.
+Cross-CIK resolver가 explicit SEC locator로 foreign CIK를 발견하면 그 CIK에 대해서도 같은 adaptive reconciled name-history builder를 사용한다.
 
-중요한 순서는 다음과 같다.
+순서:
 
 ```text
 explicit SEC CIK / Archives locator
     ↓
 CIK 확정
     ↓
-그 CIK의 submissions + historical complete-header 조회
+그 CIK의 submissions + adaptive historical complete-header scan
 ```
 
-절대 다음처럼 하지 않는다.
+절대 회사명 fuzzy search로 CIK를 추정한 뒤 alias graph를 authority로 사용하지 않는다.
 
-```text
-company name
-    ↓ fuzzy search
-CIK 추정
-```
+## Fixed-limit compatibility helper
 
-따라서 legal-name alias graph는 cross-CIK traversal을 허가하는 근거가 아니다. 이미 SEC evidence로 확정된 CIK의 identity history를 보강하는 artifact다.
-
-`cross_cik_graph.json`에는 발견된 CIK들의 cutoff-safe `legal_name_alias_graphs`도 함께 frozen 된다.
+`build_reconciled_legal_name_alias_graph(..., header_filing_limit=N)`은 실험/테스트용 exact fixed-limit helper로 유지한다. 이 helper는 이제 submissions base graph에서 직접 출발하므로 public adaptive builder를 다시 호출해 **double reconciliation / duplicate header fetch**를 하지 않는다.
 
 ## Workspace artifacts
 
@@ -272,9 +333,9 @@ source_document_graph.json
 cross_cik_graph.json
 ```
 
-그리고 동일 내용이 frozen `research_packet.json`에도 들어간다.
+동일 내용은 frozen `research_packet.json`에도 들어가며 scan status/count도 함께 보존된다.
 
-자세한 complete-header parser/reconciliation 규칙은 [`SEC_COMPLETE_SUBMISSION_NAME_HEADERS.md`](SEC_COMPLETE_SUBMISSION_NAME_HEADERS.md)를 참고한다.
+자세한 complete-header parser 규칙은 [`SEC_COMPLETE_SUBMISSION_NAME_HEADERS.md`](SEC_COMPLETE_SUBMISSION_NAME_HEADERS.md)를 참고한다.
 
 ## 의도적으로 하지 않는 것
 
@@ -285,12 +346,13 @@ cross_cik_graph.json
 - SEC metadata boundary를 법률적 name-change effective date로 단정
 - CIK가 다른 두 법인을 이름 alias만으로 합치기
 - complete header의 다른 entity section 이름을 target CIK에 합치기
+- long-history filer의 모든 complete-submission text를 무조건 exhaustive fetch
 
 ## Known limitations
 
-1. complete-header fallback은 최근 cutoff-safe filing 3개를 기본 sample로 사용한다. 아주 오래된 history가 최근 header에서 빠지는 issuer는 추가 historical scan이 필요할 수 있다.
-2. SEC submissions와 filing header 자체가 불일치할 수 있으며, 이 경우 `boundary_conflict`와 provenance를 남기고 자동 법률 판단은 하지 않는다.
-3. merger, conversion, reincorporation, successor/novation처럼 **CIK continuity 자체로 설명되지 않는 법적 succession**은 name alias와 별개의 문제다.
-4. foreign CIK 내부의 locator-less contract fallback을 그 foreign CIK의 alias graph로 다시 실행하는 단계는 별도 확장 대상이다.
+1. 기본 deep scan은 최신 3개 + adaptive temporal anchors, 최대 12개 header다. 12개보다 긴 history에서 아주 짧게 사용된 중간 이름은 targeted alias가 없는 일반 scan에서 여전히 놓칠 수 있다. 이 경우 `deep_scan_bounded` warning을 신뢰해야 한다.
+2. latest/oldest endpoint가 같은 이름인 일반 scan은 rename-and-revert 같은 드문 중간 변화를 놓칠 수 있다. 특정 이름을 확인해야 하는 named-entity path에서는 `required_aliases`가 이 early stop을 해제한다.
+3. SEC submissions와 filing header 자체가 불일치할 수 있으며, 이 경우 `boundary_conflict`와 provenance를 남기고 자동 법률 판단은 하지 않는다.
+4. merger, conversion, reincorporation, successor/novation처럼 **CIK continuity 자체로 설명되지 않는 법적 succession**은 name alias와 별개의 문제다.
 
-현재 목표는 법인명 변경 때문에 과거 계약 연결이 끊기는 false negative를 줄이면서, fuzzy legal-entity matching이 만드는 false positive와 historical look-ahead를 피하는 것이다.
+목표는 모든 역사적 법인명을 추측하는 것이 아니라, SEC provenance와 request budget을 보존하면서 오래된 계약의 legal-name false negative를 실질적으로 줄이는 것이다.
