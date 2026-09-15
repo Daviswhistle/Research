@@ -474,16 +474,32 @@ def _instrument_families(proposals: Iterable[InstrumentFieldProposal]) -> set[st
     return families
 
 
+def _specific_families(families: set[str]) -> set[str]:
+    return set(families) - {"credit"}
+
+
+def _family_set_invalid(families: set[str]) -> bool:
+    specific = _specific_families(families)
+    return len(specific) > 1
+
+
 def _families_conflict(left: set[str], right: set[str]) -> bool:
     if not left or not right:
         return False
-    for a in left:
-        for b in right:
-            if a == b:
-                return False
-            if {a, b} <= {"credit", "revolver", "term_loan"} and "credit" in {a, b}:
-                return False
-    return True
+    if _family_set_invalid(left) or _family_set_invalid(right):
+        return True
+
+    left_specific = _specific_families(left)
+    right_specific = _specific_families(right)
+    if not left_specific and not right_specific:
+        return False
+    if not left_specific:
+        # Generic credit-family evidence is compatible with a specific credit
+        # facility, but it must never bridge into notes or unrelated families.
+        return not right_specific <= {"revolver", "term_loan"}
+    if not right_specific:
+        return not left_specific <= {"revolver", "term_loan"}
+    return left_specific.isdisjoint(right_specific)
 
 
 def _proposal_conflict(
