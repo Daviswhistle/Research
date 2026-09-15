@@ -95,6 +95,7 @@ from .legal_name_reconcile import (
     reconcile_legal_name_sources,
 )
 from .market import MarketSnapshot, PricePoint, SecurityIdentity
+from .named_entity_closure import NamedEntityCrossCikClosure, close_named_entity_cross_cik
 from .named_entity_contracts import (
     ExternalEntityCandidate,
     NamedEntityContractExpansion,
@@ -151,6 +152,7 @@ __all__ = [
     "calculate_covenant_headroom",
     "CapitalStackDiffReport",
     "case_from_dict",
+    "close_named_entity_cross_cik",
     "CompleteSubmissionFormerName",
     "CompleteSubmissionNameEvidence",
     "complete_submission_text_url",
@@ -216,6 +218,7 @@ __all__ = [
     "NamedEntityContractExpansion",
     "NamedEntityContractGraph",
     "NamedEntityContractResolution",
+    "NamedEntityCrossCikClosure",
     "named_entity_contract_graph_to_dict",
     "normalize_party_name",
     "parse_cik_lookup_matches",
