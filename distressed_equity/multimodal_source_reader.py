@@ -7,6 +7,9 @@ from typing import Any
 from .sec_instruments import FilingDocument, SecInstrumentPacket
 
 
+_VISUAL_PREFIX = "VISUAL_EXTRACTION_REQUIRED|"
+
+
 @dataclass(frozen=True)
 class MultimodalSourceTask:
     task_id: str
@@ -22,9 +25,7 @@ class MultimodalSourceTask:
     questions: tuple[str, ...]
     guardrails: tuple[str, ...]
     output_contract: tuple[str, ...]
-
-
-_VISUAL_PREFIX = "VISUAL_EXTRACTION_REQUIRED|"
+    source_filing_date: date | None = None
 
 
 def _warning_fields(warning: str) -> dict[str, str]:
@@ -71,9 +72,10 @@ def _task_for_document(
     )
     output_contract = (
         "findings[]: concise material findings, not a full-document transcription",
-        "each finding: visible fact, evidence page/region, interpretation, investment implication, confidence/unresolved state",
+        "each finding: finding_id, visible_fact, evidence[], interpretation, investment_implication, confidence, unresolved",
+        "each evidence: evidence_id, page, region, visible_text",
         "disconfirming_or_ambiguous_evidence[]: anything that could invalidate the obvious reading",
-        "engine_patches[]: optional minimal model fields only, each linked to finding/evidence IDs",
+        "engine_patches[]: patch_id/path/value/finding_refs/evidence_refs/confidence/rationale",
         "unresolved[]: material questions the visual source does not answer safely",
     )
     return MultimodalSourceTask(
@@ -90,16 +92,12 @@ def _task_for_document(
         questions=questions,
         guardrails=guardrails,
         output_contract=output_contract,
+        source_filing_date=document.filing_date,
     )
 
 
 def build_multimodal_source_tasks(packet: SecInstrumentPacket) -> tuple[MultimodalSourceTask, ...]:
-    """Build visual-reader tasks only for sources deterministic/native extraction deferred.
-
-    Native-text PDF and HTML candidates remain on the deterministic path. This task
-    layer is deliberately structure-on-demand: the model reads the original source,
-    forms evidence-backed findings, and extracts only fields needed by the engine.
-    """
+    """Build visual-reader tasks only for sources deterministic/native extraction deferred."""
 
     documents_by_name: dict[tuple[str, str], FilingDocument] = {
         (document.source_accession, document.document): document
@@ -135,7 +133,7 @@ def build_multimodal_source_tasks(packet: SecInstrumentPacket) -> tuple[Multimod
 
 
 def multimodal_source_result_template(task: MultimodalSourceTask) -> dict[str, Any]:
-    """Minimal research contract: findings first, structure only at engine boundary."""
+    """Finding-first contract. Engine patches remain proposals until independently verified."""
 
     return {
         "schema_version": "1",
@@ -147,6 +145,9 @@ def multimodal_source_result_template(task: MultimodalSourceTask) -> dict[str, A
             "document_type": task.document_type,
             "url": task.source_url,
             "media_type": task.media_type,
+            "filing_date": (
+                task.source_filing_date.isoformat() if task.source_filing_date else None
+            ),
         },
         "status": "unresolved",
         "findings": [],
@@ -154,7 +155,8 @@ def multimodal_source_result_template(task: MultimodalSourceTask) -> dict[str, A
         "engine_patches": [],
         "unresolved": [],
         "warnings": [
-            "Do not populate a full debt table merely because the page contains one; extract only facts needed to support a material finding or deterministic model patch."
+            "Do not populate a full debt table merely because the page contains one; extract only facts needed to support a material finding or deterministic model patch.",
+            "Every engine patch is only a proposal until an independent verifier re-opens the cited visual evidence.",
         ],
     }
 
@@ -162,7 +164,32 @@ def multimodal_source_result_template(task: MultimodalSourceTask) -> dict[str, A
 def multimodal_source_task_to_dict(task: MultimodalSourceTask) -> dict[str, Any]:
     payload = asdict(task)
     payload["analysis_date"] = task.analysis_date.isoformat()
+    payload["source_filing_date"] = (
+        task.source_filing_date.isoformat() if task.source_filing_date else None
+    )
     return payload
+
+
+def multimodal_source_task_from_dict(raw: dict[str, Any]) -> MultimodalSourceTask:
+    filing_date = raw.get("source_filing_date")
+    return MultimodalSourceTask(
+        task_id=str(raw["task_id"]),
+        analysis_date=date.fromisoformat(str(raw["analysis_date"])[:10]),
+        company_name=str(raw.get("company_name") or ""),
+        source_accession=str(raw.get("source_accession") or ""),
+        document_name=str(raw.get("document_name") or ""),
+        document_type=str(raw.get("document_type") or ""),
+        source_url=str(raw.get("source_url") or ""),
+        media_type=str(raw.get("media_type") or "visual"),
+        reason=str(raw.get("reason") or ""),
+        objective=str(raw.get("objective") or ""),
+        questions=tuple(str(item) for item in raw.get("questions", [])),
+        guardrails=tuple(str(item) for item in raw.get("guardrails", [])),
+        output_contract=tuple(str(item) for item in raw.get("output_contract", [])),
+        source_filing_date=(
+            date.fromisoformat(str(filing_date)[:10]) if filing_date else None
+        ),
+    )
 
 
 def multimodal_source_manifest(packet: SecInstrumentPacket) -> dict[str, Any]:
@@ -179,7 +206,8 @@ def multimodal_source_manifest(packet: SecInstrumentPacket) -> dict[str, Any]:
         ],
         "notes": [
             "Multimodal reading is for source understanding and evidence-backed findings, not bulk OCR normalization.",
-            "Only minimal engine-facing patches should be structured after a material finding is established."
+            "Only minimal engine-facing patches should be structured after a material finding is established.",
+            "No engine patch is authoritative until an independent verifier re-opens the cited visual evidence.",
         ],
     }
 
