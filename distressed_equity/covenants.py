@@ -283,11 +283,13 @@ def covenant_risk_from_result(result: CovenantHeadroomResult) -> dict[str, Any]:
         f"covenant_ebitda={result.covenant_ebitda:g}",
     ]
     notes.extend(result.warnings)
+    unresolved = result.applies is None or (result.applies is True and result.breached is None)
     return {
         "name": result.name,
         "breach_month_if_unremedied": result.test_month if result.applies is True and result.breached is True else None,
         "cure_available": result.cure_available,
         "cure_cost": result.cure_cost,
+        "unresolved": unresolved,
         "notes": notes,
     }
 
