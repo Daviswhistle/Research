@@ -32,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lookback-years", type=int, default=5)
     parser.add_argument("--max-securities", type=int)
     parser.add_argument("--allow-slow-full-universe", action="store_true")
+    parser.add_argument(
+        "--allow-survivorship-unsafe-universe",
+        action="store_true",
+        help="Allow replay when provider lacks point-in-time membership provenance; output is explicitly marked unsafe",
+    )
     parser.add_argument("--output", "-o", help="JSON output path; stdout when omitted")
     parser.add_argument("--markdown-output", help="Optional human-readable summary path")
     return parser
@@ -115,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         config=config,
         symbols=_symbols(args),
         allow_slow_full_universe=args.allow_slow_full_universe,
+        allow_survivorship_unsafe_universe=args.allow_survivorship_unsafe_universe,
         max_securities=args.max_securities,
     )
     text = json.dumps(_payload(run), ensure_ascii=False, indent=2) + "\n"
