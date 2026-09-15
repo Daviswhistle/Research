@@ -115,13 +115,15 @@ def _screening_runway(candidate: ScreeningCandidate, config: ScreeningConfig) ->
         + candidate.asset_monetization
         - candidate.restricted_cash
     )
-    if liquidity < 0:
-        return True, 0
 
     mandatory: dict[int, float] = {}
     for obligation in candidate.debt_obligations:
         if obligation.cash_payment_required:
             mandatory[obligation.due_month] = mandatory.get(obligation.due_month, 0.0) + obligation.amount
+
+    liquidity -= mandatory.get(0, 0.0)
+    if liquidity < 0:
+        return True, 0
 
     horizon = max(config.runway_projection_months, candidate.recovery_month or 0, *(mandatory.keys() or [0]))
     for month in range(1, horizon + 1):
@@ -152,8 +154,14 @@ def _pre_recovery_covenants(candidate: ScreeningCandidate) -> tuple[str, ...]:
     return tuple(
         covenant.name
         for covenant in candidate.covenants
-        if covenant.breach_month_if_unremedied is not None
-        and covenant.breach_month_if_unremedied <= candidate.recovery_month
+        if (
+            covenant.breach_month_if_unremedied is not None
+            and covenant.breach_month_if_unremedied <= candidate.recovery_month
+        )
+        or (
+            covenant.unresolved
+            and (covenant.test_month is None or covenant.test_month <= candidate.recovery_month)
+        )
     )
 
 
