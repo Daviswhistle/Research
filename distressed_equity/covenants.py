@@ -289,6 +289,7 @@ def covenant_risk_from_result(result: CovenantHeadroomResult) -> dict[str, Any]:
         "breach_month_if_unremedied": result.test_month if result.applies is True and result.breached is True else None,
         "cure_available": result.cure_available,
         "cure_cost": result.cure_cost,
+        "test_month": result.test_month,
         "unresolved": unresolved,
         "notes": notes,
     }
