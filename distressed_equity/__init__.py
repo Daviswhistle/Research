@@ -6,10 +6,12 @@ from . import sec_instruments as _sec_instruments
 from .structured_debt_extraction import install_structured_debt_extraction as _install_structured_debt_extraction
 from .native_pdf_debt_extraction import install_native_pdf_debt_extraction as _install_native_pdf_debt_extraction
 from .document_debt_extraction import install_document_aware_extraction as _install_document_aware_extraction
+from .multimodal_source_reader import install_multimodal_source_manifest as _install_multimodal_source_manifest
 
 _install_structured_debt_extraction(_sec_instruments)
 _install_native_pdf_debt_extraction(_sec_instruments)
 _install_document_aware_extraction(_sec_instruments)
+_install_multimodal_source_manifest(_sec_instruments)
 
 from .agent_results import (
     AgentResult,
@@ -106,6 +108,13 @@ from .legal_name_reconcile import (
     reconcile_legal_name_sources,
 )
 from .market import MarketSnapshot, PricePoint, SecurityIdentity
+from .multimodal_source_reader import (
+    MultimodalSourceTask,
+    build_multimodal_source_tasks,
+    multimodal_source_manifest,
+    multimodal_source_result_template,
+    multimodal_source_task_to_dict,
+)
 from .named_entity_closure import (
     NamedEntityCrossCikClosure,
     NamedEntityFixedPointClosure,
@@ -163,6 +172,7 @@ __all__ = [
     "build_legal_name_alias_graph",
     "build_legal_name_alias_graph_from_submissions",
     "build_legal_name_alias_graphs",
+    "build_multimodal_source_tasks",
     "build_research_bundle",
     "build_sec_instrument_packet",
     "calculate_covenant_addback_sensitivity",
@@ -234,6 +244,10 @@ __all__ = [
     "MarketDistressSeed",
     "MarketSnapshot",
     "merge_named_entity_graphs",
+    "MultimodalSourceTask",
+    "multimodal_source_manifest",
+    "multimodal_source_result_template",
+    "multimodal_source_task_to_dict",
     "NamedEntityContractExpansion",
     "NamedEntityContractGraph",
     "NamedEntityContractResolution",
