@@ -119,6 +119,58 @@ def _parse_date(value: str | None) -> date | None:
     return date.fromisoformat(value[:10])
 
 
+def _point_in_time_company_name(
+    submissions: dict[str, Any],
+    analysis_date: date,
+    fallback: str,
+) -> tuple[str, bool]:
+    """Return a cutoff-safe name using submissions metadata only.
+
+    Today's `submissions.name` can be a post-cutoff rename. If former-name
+    metadata shows a future boundary, use the former name active at the cutoff
+    when one is explicit; otherwise withhold today's name and fall back to CIK.
+    Richer complete-submission header reconciliation happens in the legal-name
+    layer used by orchestration.
+    """
+
+    current_name = str(submissions.get("name") or "").strip()
+    former = submissions.get("formerNames") or []
+    parsed: list[tuple[str, date | None, date | None]] = []
+    if isinstance(former, list):
+        for row in former:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                start = _parse_date(row.get("from"))
+                end = _parse_date(row.get("to"))
+            except ValueError:
+                continue
+            if start and end and end < start:
+                continue
+            parsed.append((name, start, end))
+
+    active = [
+        item
+        for item in parsed
+        if (item[1] is None or item[1] <= analysis_date)
+        and (item[2] is None or analysis_date < item[2])
+    ]
+    if active:
+        return max(active, key=lambda item: item[1] or date.min)[0], True
+
+    future_boundary = any(
+        (start is not None and start > analysis_date)
+        or (end is not None and end > analysis_date)
+        for _name, start, end in parsed
+    )
+    if future_boundary:
+        return fallback, True
+    return current_name or fallback, False
+
+
 def _columnar_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
     if not data:
         return []
@@ -401,7 +453,11 @@ class SecClient:
             cik10 = normalize_cik(cik or "")
 
         submissions = self.submissions(cik10)
-        company_name = str(submissions.get("name") or resolved_name or cik10)
+        company_name, name_was_historical_or_withheld = _point_in_time_company_name(
+            submissions,
+            analysis_date,
+            cik10,
+        )
         filings = self._filings_from_submissions_payload(
             cik10, submissions, analysis_date, forms
         )
@@ -422,6 +478,10 @@ class SecClient:
             "Duration facts such as revenue, CFO and capex are raw reported periods, not normalized quarterly values.",
             "SEC ticker/CIK association files are a lookup aid and SEC does not guarantee their accuracy or scope.",
         ]
+        if name_was_historical_or_withheld:
+            warnings.append(
+                "SEC current company name was not blindly backfilled across the historical cutoff; former-name metadata or CIK fallback was used."
+            )
         if missing:
             warnings.append(
                 "No standardized point-in-time fact found for: " + ", ".join(missing)
