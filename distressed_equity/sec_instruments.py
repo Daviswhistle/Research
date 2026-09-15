@@ -40,6 +40,8 @@ _DEBT_TEXT_TERMS = _DEBT_DESCRIPTION_TERMS + (
     "first lien",
     "second lien",
     "sofr",
+    "cusip",
+    "isin",
 )
 _MONTHS = {
     name.lower(): number
