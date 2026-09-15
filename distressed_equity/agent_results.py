@@ -207,6 +207,47 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _validate_string_list(value: Any, label: str) -> str | None:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return f"{label} must be a list of strings"
+    return None
+
+
+def _validate_scenario_payload(value: dict[str, Any]) -> str | None:
+    for key in ("enterprise_value", "exit_net_debt"):
+        if not _is_number(value.get(key)):
+            return f"scenario {key} must be numeric"
+    if float(value["enterprise_value"]) < 0:
+        return "scenario enterprise_value must be non-negative"
+
+    exit_senior_claims = value.get("exit_senior_claims", 0.0)
+    if not _is_number(exit_senior_claims) or float(exit_senior_claims) < 0:
+        return "scenario exit_senior_claims must be a non-negative number"
+
+    financing = value.get("financing")
+    if financing is not None:
+        if not isinstance(financing, dict):
+            return "scenario financing must be an object or null"
+        capital_raised = financing.get("capital_raised", 0.0)
+        if not _is_number(capital_raised) or float(capital_raised) < 0:
+            return "scenario financing.capital_raised must be non-negative"
+        issue_price = financing.get("issue_price")
+        if issue_price is not None and (not _is_number(issue_price) or float(issue_price) <= 0):
+            return "scenario financing.issue_price must be positive when provided"
+        if float(capital_raised) > 0 and issue_price is None:
+            return "scenario financing.issue_price is required when capital_raised is positive"
+
+    assumptions_problem = _validate_string_list(
+        value.get("critical_assumptions", []), "scenario critical_assumptions"
+    )
+    if assumptions_problem:
+        return assumptions_problem
+    notes_problem = _validate_string_list(value.get("notes", []), "scenario notes")
+    if notes_problem:
+        return notes_problem
+    return None
+
+
 def _validate_patch_value(path: str, value: Any) -> str | None:
     positive = {
         "capital_structure.current_price",
@@ -259,18 +300,42 @@ def _validate_patch_value(path: str, value: Any) -> str | None:
                 due_month = item.get("due_month")
                 if not isinstance(due_month, int) or isinstance(due_month, bool) or due_month < 0:
                     return f"item {idx} due_month must be a non-negative integer"
+                for key in ("cash_payment_required", "refinancing_required"):
+                    if key in item and not isinstance(item[key], bool):
+                        return f"item {idx} {key} must be boolean"
+                if item.get("secured") is not None and not isinstance(item.get("secured"), bool):
+                    return f"item {idx} secured must be boolean or null"
+                if "notes" in item:
+                    problem = _validate_string_list(item["notes"], f"item {idx} notes")
+                    if problem:
+                        return problem
+            else:
+                breach_month = item.get("breach_month_if_unremedied")
+                if breach_month is not None and (
+                    not isinstance(breach_month, int) or isinstance(breach_month, bool) or breach_month < 0
+                ):
+                    return f"item {idx} breach_month_if_unremedied must be a non-negative integer or null"
+                test_month = item.get("test_month")
+                if test_month is not None and (
+                    not isinstance(test_month, int) or isinstance(test_month, bool) or test_month < 0
+                ):
+                    return f"item {idx} test_month must be a non-negative integer or null"
+                if item.get("cure_available") is not None and not isinstance(item.get("cure_available"), bool):
+                    return f"item {idx} cure_available must be boolean or null"
+                cure_cost = item.get("cure_cost", 0.0)
+                if not _is_number(cure_cost) or float(cure_cost) < 0:
+                    return f"item {idx} cure_cost must be non-negative"
+                if "unresolved" in item and not isinstance(item["unresolved"], bool):
+                    return f"item {idx} unresolved must be boolean"
+                if "notes" in item:
+                    problem = _validate_string_list(item["notes"], f"item {idx} notes")
+                    if problem:
+                        return problem
     elif path in {"base_scenario", "reference_scenario", "downside_scenario"}:
         if value is not None and not isinstance(value, dict):
             return "must be an object or null"
         if isinstance(value, dict):
-            for key in ("enterprise_value", "exit_net_debt"):
-                if not _is_number(value.get(key)):
-                    return f"scenario {key} must be numeric"
-            if float(value["enterprise_value"]) < 0:
-                return "scenario enterprise_value must be non-negative"
-            assumptions = value.get("critical_assumptions", [])
-            if not isinstance(assumptions, list) or not all(isinstance(item, str) for item in assumptions):
-                return "scenario critical_assumptions must be a list of strings"
+            return _validate_scenario_payload(value)
     return None
 
 
