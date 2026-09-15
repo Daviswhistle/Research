@@ -161,8 +161,6 @@ distressed-equity-sec-debt \
 
 정규식으로 찾은 금액·연도·금리는 **후보**일 뿐 자동 debt schedule로 승격하지 않습니다. Filing-to-filing diff도 confirmed amendment가 아니라 금액/만기/비율 신호가 바뀐 위치를 알려주는 탐색 도구입니다.
 
-SEC exhibit 안에서 동일 debt instrument의 title, principal, maturity, CUSIP/ISIN 등이 멀리 떨어져 나타날 수 있으므로 source span을 먼저 보존한 뒤 **같은 exhibit 내부에서만** 보수적으로 evidence clustering을 수행합니다. 명시 identifier·maturity·note series·instrument family 충돌은 hard split이며, generic `Credit Agreement`나 `Indenture`라는 이유만으로 서로 다른 instruments를 합치지 않습니다. Multi-span candidate는 계속 verification 대상이지 authoritative debt row가 아닙니다. 자세한 규칙은 [`docs/DEBT_EVIDENCE_CLUSTERING.md`](docs/DEBT_EVIDENCE_CLUSTERING.md)를 참고하세요.
-
 ### Stable debt instrument ledger
 
 Filing마다 이름이 조금씩 달라지는 동일 채무를 추적하기 위해 instrument-level stable ID 레이어를 둡니다.
@@ -175,6 +173,8 @@ distressed-equity-debt-ledger debt_instruments.json \
 Matching 우선순위는 CUSIP/ISIN 같은 명시 identifier가 가장 높고, 없으면 instrument type, 이름 token, maturity, coupon, seniority/security를 이용합니다. Best/second-best 후보가 비슷하면 **억지로 같은 채무로 합치지 않고 새 stable ID**를 만듭니다.
 
 Ledger는 principal, maturity, pricing, ranking/security, revolver capacity/usage 변화를 instrument 단위로 보여줍니다. 이는 amendment 후보 탐색이며 법률적 동일성이나 amendment 효력을 자동 확정하지 않습니다.
+
+SEC debt exhibit extraction은 일반 prose뿐 아니라 HTML table의 row/column 구조도 보존합니다. `rowspan`/`colspan`, table header unit, same-row instrument association을 유지하며, table body를 다시 flattened prose로 중복 처리하지 않습니다. PDF/image/image-heavy HTML은 강제로 text regex extraction하지 않고 `VISUAL_EXTRACTION_REQUIRED|...` provenance로 unresolved 상태를 남깁니다. 자세한 규칙은 [`docs/STRUCTURED_DEBT_EXTRACTION.md`](docs/STRUCTURED_DEBT_EXTRACTION.md)를 참고하세요.
 
 ### Covenant EBITDA / headroom
 
