@@ -88,7 +88,7 @@ def test_explicit_notes_terms_produce_source_backed_high_confidence_fields():
     assert candidate.snapshot_template["coupon_pct"] == 5.25
     assert candidate.snapshot_template["maturity_year"] == 2028
     assert candidate.snapshot_template["principal"] == 500_000_000
-    assert candidate.source_span_ids[0] == proposals["principal"].source_span_id
+    assert proposals["principal"].source_span_id in candidate.source_span_ids
 
 
 def test_credit_facility_extracts_commitment_and_sofr_spread():
@@ -206,6 +206,27 @@ def test_generic_credit_agreement_does_not_merge_revolver_and_term_loan():
         {proposal.value for proposal in candidate.proposals if proposal.field == "instrument_type"}
         >= {"revolving_credit_facility", "term_loan"}
         for candidate in candidates
+    )
+
+
+def test_standalone_cusip_paragraph_is_retained_as_cluster_evidence():
+    document = source_document(
+        description="Indenture relating to 5.25% Senior Secured Notes due 2028",
+        document="standalone-id.htm",
+    )
+    filler = "".join(f"<p>Unrelated boilerplate text {index}.</p>" for index in range(10))
+    html = (
+        "<html><body>"
+        "<p>This Indenture governs the 5.25% Senior Secured Notes due 2028.</p>"
+        + filler
+        + "<p>CUSIP No. 123456789.</p>"
+        + "</body></html>"
+    )
+    _, candidates = extract_source_candidates(html, document)
+    assert any(
+        proposal.field == "cusip" and proposal.value == "123456789"
+        for candidate in candidates
+        for proposal in candidate.proposals
     )
 
 
