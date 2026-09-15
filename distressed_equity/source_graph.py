@@ -387,10 +387,6 @@ def resolve_source_document_graph(
                 continue
 
             filing_node = _filing_node(target_filing, depth=source.depth + 1)
-            if filing_node and filing_node.node_id not in nodes and len(nodes) < max_nodes:
-                nodes[filing_node.node_id] = filing_node
-                queue.append(filing_node)
-
             docs = index_cache.get(target_filing.accession_number)
             if docs is None:
                 try:
@@ -398,19 +394,52 @@ def resolve_source_document_graph(
                     docs = parse_filing_documents(index_html, target_filing)
                     index_cache[target_filing.accession_number] = docs
                 except Exception as exc:
-                    edges.append(SourceGraphEdge(edge_id, source.node_id, reference.reference_id, filing_node.node_id if filing_node else None, "filing_resolved_document_unavailable", f"target filing resolved but index fetch failed: {exc}", target_filing.accession_number, reference.cited_exhibit))
+                    filing_target_id = None
+                    if filing_node is not None:
+                        if filing_node.node_id in nodes:
+                            filing_target_id = filing_node.node_id
+                        elif len(nodes) < max_nodes:
+                            nodes[filing_node.node_id] = filing_node
+                            queue.append(filing_node)
+                            filing_target_id = filing_node.node_id
+                    edges.append(SourceGraphEdge(edge_id, source.node_id, reference.reference_id, filing_target_id, "filing_resolved_document_unavailable", f"target filing resolved but index fetch failed: {exc}", target_filing.accession_number, reference.cited_exhibit))
                     continue
 
             target_document, document_reason = _match_target_document(reference, docs)
             if target_document is None:
-                edges.append(SourceGraphEdge(edge_id, source.node_id, reference.reference_id, filing_node.node_id if filing_node else None, "filing_resolved", document_reason, target_filing.accession_number, reference.cited_exhibit))
+                filing_target_id = None
+                if filing_node is not None:
+                    if filing_node.node_id in nodes:
+                        filing_target_id = filing_node.node_id
+                    elif len(nodes) < max_nodes:
+                        nodes[filing_node.node_id] = filing_node
+                        queue.append(filing_node)
+                        filing_target_id = filing_node.node_id
+                status = "filing_resolved" if filing_target_id is not None else "blocked_max_nodes"
+                reason = document_reason if filing_target_id is not None else f"{document_reason}; target filing node omitted at max_nodes={max_nodes}"
+                edges.append(SourceGraphEdge(edge_id, source.node_id, reference.reference_id, filing_target_id, status, reason, target_filing.accession_number, reference.cited_exhibit))
                 continue
 
             target_node = _document_node(target_document, depth=source.depth + 1)
-            resolved_documents[target_node.node_id] = target_document
-            if target_node.node_id not in nodes and len(nodes) < max_nodes:
+            if target_node.node_id not in nodes:
+                if len(nodes) >= max_nodes:
+                    edges.append(SourceGraphEdge(edge_id, source.node_id, reference.reference_id, None, "blocked_max_nodes", f"specific target exhibit resolved but node omitted at max_nodes={max_nodes}", target_filing.accession_number, reference.cited_exhibit))
+                    continue
                 nodes[target_node.node_id] = target_node
                 queue.append(target_node)
+            resolved_documents[target_node.node_id] = target_document
+
+            # The exhibit is the authoritative target for a specific exhibit reference.
+            # Add the filing primary only when capacity remains; never consume the final
+            # slot with the filing and then emit a resolved edge to an omitted exhibit.
+            if (
+                filing_node is not None
+                and filing_node.node_id not in nodes
+                and len(nodes) < max_nodes
+            ):
+                nodes[filing_node.node_id] = filing_node
+                queue.append(filing_node)
+
             edges.append(SourceGraphEdge(edge_id, source.node_id, reference.reference_id, target_node.node_id, "resolved", f"{filing_reason}; {document_reason}", target_filing.accession_number, reference.cited_exhibit))
 
     if queue:
