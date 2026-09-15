@@ -4,8 +4,10 @@
 # bind sec_instruments helpers through `from ... import ...`.
 from . import sec_instruments as _sec_instruments
 from .structured_debt_extraction import install_structured_debt_extraction as _install_structured_debt_extraction
+from .native_pdf_debt_extraction import install_native_pdf_debt_extraction as _install_native_pdf_debt_extraction
 
 _install_structured_debt_extraction(_sec_instruments)
+_install_native_pdf_debt_extraction(_sec_instruments)
 
 from .agent_results import (
     AgentResult,
