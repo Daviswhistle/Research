@@ -12,6 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Daviswhistle" }]
 dependencies = [
   "requests>=2.31,<3",
+  "pypdf>=6,<7",
 ]
 
 [project.optional-dependencies]
