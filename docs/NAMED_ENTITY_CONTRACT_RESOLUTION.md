@@ -193,7 +193,7 @@ confirmed external contract exhibit
 
 Named-entity resolution 자체는 debt principal, commitment, maturity 등을 authoritative value로 확정하지 않는다.
 
-## Resolution priority
+## Resolution priority and alternating closure
 
 강한 locator 경로가 항상 먼저다.
 
@@ -204,11 +204,33 @@ Named-entity resolution 자체는 debt principal, commitment, maturity 등을 au
 4. foreign-CIK locator-less contract + fixed-point closure
 5. source-confirmed named-entity contract fallback
 6. named-resolved exhibit에서 explicit cross-CIK closure 재시작
+7. 6번으로 새로 도달한 문서에서만 named resolver 재실행
+8. 5~7을 bounded fixed point까지 반복
 ```
 
-5번의 이름 기반 후보 생성은 explicit provenance를 대체하지 않는다. 6번에서 새 `resolved_cross_cik`가 생기는 경우는 **이미 확인된 exhibit 안에 실제 SEC Archives / CIK / accession locator가 존재할 때뿐**이다.
+핵심 안전 규칙은 **named hop 사이에 explicit SEC locator hop이 반드시 하나 이상 있어야 한다**는 것이다.
 
-## Depth
+허용:
+
+```text
+name-only A
+  -> explicit B
+  -> name-only C
+  -> explicit D
+  -> name-only E
+```
+
+허용하지 않음:
+
+```text
+name-only A
+  -> name-only C
+  -> name-only E
+```
+
+즉 `name-only -> name-only`를 직접 재귀하지 않는다. 추가 named pass는 이전 named-resolved exhibit가 실제 SEC Archives URL / CIK / accession locator를 노출하고, 그 explicit closure가 새로운 source document를 만들어야만 열린다.
+
+## Global depth / node / iteration bounds
 
 Workspace에서는 root source nodes와 foreign contract nodes를 global depth로 재기준화한 뒤 named resolver에 전달한다.
 
@@ -224,36 +246,47 @@ Named-entity 경계 자체도 한 depth를 소비한다.
 
 ```text
 root source                              depth 0
-  -> name-confirmed target exhibit       depth 1
-  -> explicit foreign SEC locator        depth 2
-  -> foreign locator-less old contract   depth 3
+  -> name-confirmed A exhibit            depth 1
+  -> explicit B SEC locator              depth 2
+  -> name-confirmed C exhibit            depth 3
 ```
 
-`close_named_entity_cross_cik()`는 name-confirmed exhibit를 depth `source_depth + 1`의 synthetic seed로 만들어 기존 explicit cross-CIK resolver와 foreign fixed-point closure를 재사용한다.
+고정점 엔진 `close_named_entity_fixed_point()`는 다음 세 가지를 동시에 제한한다.
 
-## Named-entity → explicit cross-CIK restart
+- `max_depth`: 모든 named/explicit/foreign hop이 공유하는 global depth
+- `max_nodes`: named resolver가 스캔한 unique source `(CIK, URL)`의 총 budget과 closure에 전달되는 node cap
+- `max_iterations`: alternating named/explicit round cap, 기본 8
 
-유일하게 확인된 named-entity exhibit는 debt extraction에서 끝나지 않는다. 그 exhibit가 새로운 명시적 SEC locator를 포함하면 다시 graph closure의 source가 된다.
+이미 처리한 `(CIK, source URL)`은 다시 named scan하지 않고, 이미 closure seed로 사용한 `(target CIK, target document URL)`도 다시 처리하지 않는다. Named graph의 candidate/resolution/document도 semantic key로 merge해 iteration마다 중복 레코드가 쌓이지 않는다.
+
+## Alternating fixed point
+
+현재 전체 흐름은 다음과 같다.
 
 ```text
-name-only party
-    -> source-date CIK confirmation
-    -> unique historical contract exhibit
-    -> explicit SEC Archives / CIK / accession reference
-    -> resolved_cross_cik
-    -> foreign same-CIK source graph
-    -> foreign locator-less contract fallback
-    -> bounded fixed point
+root / existing foreign sources
+    -> named resolver
+    -> resolved_named_entity_contract A
+    -> A exhibit explicit locator scan
+    -> resolved_cross_cik B
+    -> B same-CIK + locator-less foreign closure
+    -> newly exposed B-source documents
+    -> named resolver rerun
+    -> resolved_named_entity_contract C
+    -> C exhibit explicit locator scan
+    -> ...
+    -> no fresh source / depth exhausted / node budget exhausted / iteration cap
 ```
 
-중요한 provenance 구분:
+각 named pass에서 새로 확인된 target CIK의 point-in-time legal-name graph도 legal-name set에 추가한다. 이후 explicit/foreign contract matching에서 root alias나 다른 CIK alias가 섞이지 않는다.
 
-- `root -> named target`은 `resolved_named_entity_contract`
-- `named target exhibit -> explicit foreign target`은 `resolved_cross_cik`
+`cross_cik_graph.json`에는 최종 fixed-point graph가 저장되고 다음 metadata도 기록된다.
 
-따라서 이름 추론을 explicit locator처럼 가장하지 않는다.
+```text
+named_entity_fixed_point_iterations
+```
 
-Closure가 끝난 뒤 `cross_cik_graph.json`은 **최종 `cross_expanded.cross_cik_graph`에서 다시 직렬화**한다. 초기 cross graph를 미리 직렬화한 뒤 closure 결과를 일부 nested field로만 덧붙이지 않으므로, closure에서 새로 생긴 top-level `references`, `resolutions`, `entity_nodes`, `resolved_documents`가 누락되지 않는다.
+`named_entity_contract_graph.json`은 첫 pass만이 아니라 모든 alternating pass의 candidates / resolutions / resolved documents를 merge한 aggregate graph다.
 
 동일 동작은 다음 두 진입점 모두에 적용된다.
 
@@ -279,9 +312,9 @@ Closure가 끝난 뒤 `cross_cik_graph.json`은 **최종 `cross_expanded.cross_c
 - source contract가 약칭/trade name만 쓰고 legal name을 쓰지 않은 경우
 - source-date legal-name evidence가 최근 complete-submission header 범위 밖에 있어 확인되지 않는 경우
 - target filer가 public EDGAR filing history를 갖지 않아 contract confirmation이 불가능한 경우
-- closure 이후 새 문서에 또 다른 **name-only** 외부 법인이 등장하는 경우는 현재 같은 iteration 안에서 named resolver를 재호출하지 않음
+- named target 뒤에 explicit SEC locator가 전혀 없고, 오직 또 다른 name-only party만 등장하는 경우
 
-마지막 항목은 explicit locator closure와 의도적으로 구분한다. 현재 구현은 사용자가 요청한 `name-only -> confirmed contract -> explicit locator -> ...` 체인을 닫지만, 무제한 name-only/name-only 재귀는 허용하지 않는다.
+마지막 항목은 의도적인 precision boundary다. 현재 구현은 alternating `named -> explicit -> named` 체인은 반복하지만, SEC locator 없이 이름 추론만 연속되는 체인은 열지 않는다.
 
 ## Safety properties
 
@@ -295,6 +328,9 @@ Closure가 끝난 뒤 `cross_cik_graph.json`은 **최종 `cross_expanded.cross_c
 - 복수 결과는 ambiguous
 - name-origin provenance와 explicit cross-CIK provenance를 별도 보존
 - named hop과 explicit hop 모두 동일 global-depth budget을 소비
+- direct name-only/name-only recursion 금지
+- unique source / named target semantic dedupe
+- iteration cap으로 cyclic graph 폭주 방지
 - resolved exhibit도 authoritative debt row로 직접 승격하지 않음
 - closure 이후 최종 cross graph를 재직렬화해 provenance 누락 방지
 
@@ -305,6 +341,8 @@ SEC cumulative all-CIK candidate
     -> source-date SEC identity confirmation
     -> unique historical contract confirmation
     -> explicit cross-CIK restart when present
+    -> newly exposed source에서 named resolution 재실행
+    -> bounded alternating fixed point
     -> source-backed debt extraction
 ```
 
