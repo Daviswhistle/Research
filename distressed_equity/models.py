@@ -65,13 +65,15 @@ class CovenantRisk:
     """A covenant or springing-maturity risk that can interrupt the recovery path.
 
     `unresolved=True` means applicability or compliance could not be determined.
-    It is a research blocker, not evidence of compliance.
+    It is a research blocker, not evidence of compliance. `test_month` preserves
+    the expected test timing even when breach status is unresolved.
     """
 
     name: str
     breach_month_if_unremedied: int | None = None
     cure_available: bool | None = None
     cure_cost: float = 0.0
+    test_month: int | None = None
     unresolved: bool = False
     notes: tuple[str, ...] = ()
 
