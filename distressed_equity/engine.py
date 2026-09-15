@@ -44,9 +44,10 @@ def _mandatory_cash_payments(case: CaseInput) -> dict[int, float]:
 
 def time_to_liquidity_exhaustion(case: CaseInput) -> int | None:
     liquidity = case.liquidity.total_available_liquidity
+    mandatory = _mandatory_cash_payments(case)
+    liquidity -= mandatory.get(0, 0.0)
     if liquidity < 0:
         return 0
-    mandatory = _mandatory_cash_payments(case)
     for month, fcf in enumerate(case.liquidity.monthly_free_cash_flow, start=1):
         liquidity += fcf
         liquidity -= mandatory.get(month, 0.0)
@@ -121,8 +122,14 @@ def _pre_recovery_covenants(case: CaseInput) -> tuple[str, ...]:
     return tuple(
         covenant.name
         for covenant in case.covenants
-        if covenant.breach_month_if_unremedied is not None
-        and covenant.breach_month_if_unremedied <= recovery
+        if (
+            covenant.breach_month_if_unremedied is not None
+            and covenant.breach_month_if_unremedied <= recovery
+        )
+        or (
+            covenant.unresolved
+            and (covenant.test_month is None or covenant.test_month <= recovery)
+        )
     )
 
 
