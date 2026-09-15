@@ -11,7 +11,7 @@ from .alpha_vantage import AlphaVantageProvider
 from .debt_instruments import build_debt_instrument_ledger, debt_instrument_ledger_to_dict, debt_snapshots_from_dict
 from .instrument_verification import validate_debt_snapshots_against_source_packet
 from .orchestration import ResearchBundle, build_research_bundle, ingest_research_bundle, render_research_summary
-from .sec import SecClient
+from .sec import SecClient, normalize_cik
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,13 +94,36 @@ def _load_json_any(path: str | Path) -> dict[str, Any] | list[dict[str, Any]]:
     return payload
 
 
-def _bundle_from_frozen_packet(packet: dict[str, Any], cutoff: date) -> ResearchBundle:
+def _bundle_from_frozen_packet(
+    packet: dict[str, Any],
+    cutoff: date,
+    *,
+    requested_ticker: str | None = None,
+    requested_cik: str | None = None,
+) -> ResearchBundle:
     snapshot = packet.get("snapshot") or {}
     packet_date = str(snapshot.get("analysis_date") or "")[:10]
     if packet_date and packet_date != cutoff.isoformat():
         raise ValueError(
             f"workspace packet cutoff {packet_date} does not match requested {cutoff.isoformat()}; use --refresh intentionally"
         )
+
+    frozen_ticker = str(snapshot.get("ticker") or "").strip().upper() or None
+    frozen_cik_raw = snapshot.get("cik")
+    frozen_cik = normalize_cik(frozen_cik_raw) if frozen_cik_raw else None
+    if requested_ticker is not None:
+        requested = requested_ticker.strip().upper()
+        if frozen_ticker != requested:
+            raise ValueError(
+                f"workspace packet ticker {frozen_ticker or 'unknown'} does not match requested {requested}; use --refresh intentionally"
+            )
+    if requested_cik is not None:
+        requested = normalize_cik(requested_cik)
+        if frozen_cik != requested:
+            raise ValueError(
+                f"workspace packet CIK {frozen_cik or 'unknown'} does not match requested {requested}; use --refresh intentionally"
+            )
+
     return ResearchBundle(
         ticker=snapshot.get("ticker"),
         company_name=str(snapshot.get("company_name") or snapshot.get("cik") or "Unknown company"),
@@ -147,7 +170,12 @@ def main(argv: list[str] | None = None) -> int:
     packet_path = workspace / "research_packet.json"
 
     if packet_path.exists() and not args.refresh:
-        bundle = _bundle_from_frozen_packet(_load_json(packet_path), cutoff)
+        bundle = _bundle_from_frozen_packet(
+            _load_json(packet_path),
+            cutoff,
+            requested_ticker=args.ticker,
+            requested_cik=args.cik,
+        )
     else:
         sec_client = SecClient(user_agent=args.user_agent)
         market_provider = None
