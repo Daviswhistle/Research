@@ -94,7 +94,17 @@ def _effective_maturity(snapshot: DebtInstrumentSnapshot) -> tuple[int | None, i
     return snapshot.maturity_year, None, None
 
 
+def _explicit_identifier_conflict(left: DebtInstrumentSnapshot, right: DebtInstrumentSnapshot) -> bool:
+    left_cusip, right_cusip = _clean_identifier(left.cusip), _clean_identifier(right.cusip)
+    if left_cusip and right_cusip and left_cusip != right_cusip:
+        return True
+    left_isin, right_isin = _clean_identifier(left.isin), _clean_identifier(right.isin)
+    return bool(left_isin and right_isin and left_isin != right_isin)
+
+
 def _explicit_identifier_match(left: DebtInstrumentSnapshot, right: DebtInstrumentSnapshot) -> bool:
+    if _explicit_identifier_conflict(left, right):
+        return False
     left_cusip, right_cusip = _clean_identifier(left.cusip), _clean_identifier(right.cusip)
     if left_cusip and right_cusip and left_cusip == right_cusip:
         return True
@@ -104,6 +114,8 @@ def _explicit_identifier_match(left: DebtInstrumentSnapshot, right: DebtInstrume
 
 def instrument_match_score(previous: DebtInstrumentSnapshot, current: DebtInstrumentSnapshot) -> float:
     """Heuristic identity score. A high score is not proof of amendment identity."""
+    if _explicit_identifier_conflict(previous, current):
+        return -1.0
     if _explicit_identifier_match(previous, current):
         return 100.0
 
@@ -266,8 +278,9 @@ def build_debt_instrument_ledger(
     """Match instrument versions through time without pretending ambiguous matches are exact.
 
     A row is matched only to an instrument seen before the current as-of date.
-    Exact CUSIP/ISIN matches dominate. Heuristic matches below the threshold or
-    within `ambiguity_margin` of the second-best candidate start a new stable ID.
+    Exact CUSIP/ISIN matches dominate. Conflicting explicit identifiers are a hard
+    non-match. Heuristic matches below the threshold or within `ambiguity_margin`
+    of the second-best candidate start a new stable ID.
     """
     ordered = sorted(snapshots, key=lambda item: (item.as_of_date, item.source_accession, item.name))
     versions: list[DebtInstrumentVersion] = []
@@ -278,10 +291,14 @@ def build_debt_instrument_ledger(
 
     for snapshot in ordered:
         candidates: list[tuple[float, DebtInstrumentVersion]] = []
+        identifier_conflicts: list[str] = []
         for stable_id, prior_version in latest_by_stable_id.items():
             if prior_version.snapshot.as_of_date >= snapshot.as_of_date:
                 continue
             if stable_id in used_by_date.setdefault(snapshot.as_of_date, set()):
+                continue
+            if _explicit_identifier_conflict(prior_version.snapshot, snapshot):
+                identifier_conflicts.append(stable_id)
                 continue
             score = instrument_match_score(prior_version.snapshot, snapshot)
             candidates.append((score, prior_version))
@@ -291,6 +308,11 @@ def build_debt_instrument_ledger(
         confidence = "new"
         match_score: float | None = None
         version_warnings: list[str] = []
+        if identifier_conflicts:
+            version_warnings.append(
+                "explicit identifier conflict excluded prior instrument(s): "
+                + ", ".join(identifier_conflicts)
+            )
         exact_matches = [item for item in candidates if _explicit_identifier_match(item[1].snapshot, snapshot)]
         if len(exact_matches) == 1:
             match_score, matched = exact_matches[0]
