@@ -61,6 +61,7 @@ def _covenant(raw: dict[str, Any]) -> CovenantRisk:
         ),
         cure_available=raw.get("cure_available"),
         cure_cost=float(raw.get("cure_cost", 0.0)),
+        test_month=(int(raw["test_month"]) if raw.get("test_month") is not None else None),
         unresolved=bool(raw.get("unresolved", False)),
         notes=tuple(raw.get("notes", [])),
     )
