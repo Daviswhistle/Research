@@ -1,5 +1,12 @@
 """Deterministic distressed-equity convexity research engine."""
 
+# Install structured table / visual-exhibit extraction before downstream modules
+# bind sec_instruments helpers through `from ... import ...`.
+from . import sec_instruments as _sec_instruments
+from .structured_debt_extraction import install_structured_debt_extraction as _install_structured_debt_extraction
+
+_install_structured_debt_extraction(_sec_instruments)
+
 from .agent_results import (
     AgentResult,
     IngestionReport,
