@@ -62,12 +62,17 @@ class DebtObligation:
 
 @dataclass(frozen=True)
 class CovenantRisk:
-    """A covenant or springing-maturity risk that can interrupt the recovery path."""
+    """A covenant or springing-maturity risk that can interrupt the recovery path.
+
+    `unresolved=True` means applicability or compliance could not be determined.
+    It is a research blocker, not evidence of compliance.
+    """
 
     name: str
     breach_month_if_unremedied: int | None = None
     cure_available: bool | None = None
     cure_cost: float = 0.0
+    unresolved: bool = False
     notes: tuple[str, ...] = ()
 
 
