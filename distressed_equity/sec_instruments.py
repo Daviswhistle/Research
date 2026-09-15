@@ -137,6 +137,8 @@ class DebtInstrumentSourceCandidate:
     source_span_ids: tuple[str, ...]
     snapshot_template: dict[str, Any]
     warnings: tuple[str, ...] = ()
+    cluster_status: str = "single_span"
+    cluster_basis: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -148,6 +150,13 @@ class SecInstrumentPacket:
     spans: tuple[InstrumentSourceSpan, ...]
     candidates: tuple[DebtInstrumentSourceCandidate, ...]
     warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _SpanFragment:
+    span: InstrumentSourceSpan
+    proposals: tuple[InstrumentFieldProposal, ...]
+    order: int
 
 
 class _FilingIndexParser(HTMLParser):
@@ -417,6 +426,375 @@ def _proposals_for_block(span_id: str, block: str, document: FilingDocument) -> 
     return tuple(proposals)
 
 
+def _text_key(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value)).strip().lower()
+
+
+def _proposal_values(
+    proposals: Iterable[InstrumentFieldProposal],
+    field: str,
+    *,
+    confidence: str | None = None,
+) -> set[Any]:
+    return {
+        item.value
+        for item in proposals
+        if item.field == field and (confidence is None or item.confidence == confidence)
+    }
+
+
+def _proposal_names(
+    proposals: Iterable[InstrumentFieldProposal],
+    *,
+    basis: str | None = None,
+) -> set[str]:
+    return {
+        _text_key(item.value)
+        for item in proposals
+        if item.field == "name" and (basis is None or item.basis == basis)
+    }
+
+
+def _instrument_families(proposals: Iterable[InstrumentFieldProposal]) -> set[str]:
+    families: set[str] = set()
+    for value in _proposal_values(proposals, "instrument_type"):
+        text = str(value)
+        if text in {"notes", "indenture_notes"}:
+            families.add("notes")
+        elif text == "revolving_credit_facility":
+            families.add("revolver")
+        elif text == "term_loan":
+            families.add("term_loan")
+        elif text == "credit_facility":
+            families.add("credit")
+        elif text:
+            families.add(text)
+    return families
+
+
+def _families_conflict(left: set[str], right: set[str]) -> bool:
+    if not left or not right:
+        return False
+    for a in left:
+        for b in right:
+            if a == b:
+                return False
+            if {a, b} <= {"credit", "revolver", "term_loan"} and "credit" in {a, b}:
+                return False
+    return True
+
+
+def _proposal_conflict(
+    left: Iterable[InstrumentFieldProposal],
+    right: Iterable[InstrumentFieldProposal],
+) -> bool:
+    left = tuple(left)
+    right = tuple(right)
+    for field in ("cusip", "isin", "maturity_date", "maturity_year"):
+        a = _proposal_values(left, field, confidence="high")
+        b = _proposal_values(right, field, confidence="high")
+        if a and b and a.isdisjoint(b):
+            return True
+
+    a_coupon = _proposal_values(left, "coupon_pct", confidence="high")
+    b_coupon = _proposal_values(right, "coupon_pct", confidence="high")
+    if a_coupon and b_coupon and a_coupon.isdisjoint(b_coupon):
+        if "notes" in _instrument_families(left) or "notes" in _instrument_families(right):
+            return True
+
+    left_note_names = _proposal_names(left, basis="explicit note title with coupon and due year")
+    right_note_names = _proposal_names(right, basis="explicit note title with coupon and due year")
+    if left_note_names and right_note_names and left_note_names.isdisjoint(right_note_names):
+        return True
+
+    return _families_conflict(_instrument_families(left), _instrument_families(right))
+
+
+def _document_identity(document: FilingDocument) -> tuple[str, str, float | None, int | None] | None:
+    note = _NOTES_TITLE_RE.search(document.description)
+    if note:
+        return (
+            "notes",
+            _text_key(note.group(0)),
+            float(note.group("coupon")),
+            int(note.group("year")),
+        )
+    facility = _FACILITY_RE.search(document.description)
+    if facility:
+        label = re.sub(r"\s+", " ", facility.group("label")).strip()
+        return (
+            _infer_instrument_type(label, document.description) or "credit_facility",
+            _text_key(label),
+            None,
+            None,
+        )
+    return None
+
+
+def _cluster_context(
+    document: FilingDocument,
+    fragments: tuple[_SpanFragment, ...],
+) -> dict[str, Any]:
+    note_names: set[str] = set()
+    facility_names: set[str] = set()
+    for fragment in fragments:
+        note_names.update(
+            _proposal_names(fragment.proposals, basis="explicit note title with coupon and due year")
+        )
+        facility_names.update(_proposal_names(fragment.proposals, basis="facility name phrase"))
+    return {
+        "document_identity": _document_identity(document),
+        "unique_note_name": next(iter(note_names)) if len(note_names) == 1 else None,
+        "unique_facility_name": next(iter(facility_names)) if len(facility_names) == 1 else None,
+    }
+
+
+def _fragment_matches_note_anchor(fragment: _SpanFragment, anchor_name: str | None) -> bool:
+    families = _instrument_families(fragment.proposals)
+    if families and families.isdisjoint({"notes"}):
+        return False
+    explicit = _proposal_names(fragment.proposals, basis="explicit note title with coupon and due year")
+    return not explicit or (anchor_name is not None and anchor_name in explicit)
+
+
+def _fragment_matches_facility_anchor(fragment: _SpanFragment, anchor_name: str | None) -> bool:
+    families = _instrument_families(fragment.proposals)
+    if families and "notes" in families:
+        return False
+    explicit = _proposal_names(fragment.proposals, basis="facility name phrase")
+    return not explicit or (anchor_name is not None and anchor_name in explicit)
+
+
+def _pair_link(
+    left: _SpanFragment,
+    right: _SpanFragment,
+    context: dict[str, Any],
+) -> tuple[int, str | None]:
+    if _proposal_conflict(left.proposals, right.proposals):
+        return 0, None
+
+    for field in ("cusip", "isin"):
+        a = _proposal_values(left.proposals, field, confidence="high")
+        b = _proposal_values(right.proposals, field, confidence="high")
+        if a and b and not a.isdisjoint(b):
+            return 100, f"same_explicit_{field}"
+
+    left_note = _proposal_names(left.proposals, basis="explicit note title with coupon and due year")
+    right_note = _proposal_names(right.proposals, basis="explicit note title with coupon and due year")
+    if left_note and right_note and not left_note.isdisjoint(right_note):
+        return 95, "same_explicit_note_title"
+
+    document_identity = context.get("document_identity")
+    if document_identity and document_identity[0] == "notes":
+        anchor_name = document_identity[1]
+        if _fragment_matches_note_anchor(left, anchor_name) and _fragment_matches_note_anchor(right, anchor_name):
+            return 90, "specific_document_note_identity"
+
+    unique_note = context.get("unique_note_name")
+    if unique_note and _fragment_matches_note_anchor(left, unique_note) and _fragment_matches_note_anchor(right, unique_note):
+        return 85, "unique_explicit_note_identity_in_document"
+
+    left_facility = _proposal_names(left.proposals, basis="facility name phrase")
+    right_facility = _proposal_names(right.proposals, basis="facility name phrase")
+    if left_facility and right_facility and not left_facility.isdisjoint(right_facility):
+        return 80, "same_explicit_facility_label"
+
+    if document_identity and document_identity[0] != "notes":
+        anchor_name = document_identity[1]
+        if _fragment_matches_facility_anchor(left, anchor_name) and _fragment_matches_facility_anchor(right, anchor_name):
+            return 75, "specific_document_facility_identity"
+
+    unique_facility = context.get("unique_facility_name")
+    if unique_facility and _fragment_matches_facility_anchor(left, unique_facility) and _fragment_matches_facility_anchor(right, unique_facility):
+        return 70, "unique_explicit_facility_identity_in_document"
+
+    left_year = _proposal_values(left.proposals, "maturity_year", confidence="high")
+    right_year = _proposal_values(right.proposals, "maturity_year", confidence="high")
+    left_coupon = _proposal_values(left.proposals, "coupon_pct", confidence="high")
+    right_coupon = _proposal_values(right.proposals, "coupon_pct", confidence="high")
+    if (
+        left_year
+        and right_year
+        and not left_year.isdisjoint(right_year)
+        and left_coupon
+        and right_coupon
+        and not left_coupon.isdisjoint(right_coupon)
+    ):
+        return 75, "same_note_coupon_and_maturity"
+
+    return 0, None
+
+
+def _cluster_fragments(
+    document: FilingDocument,
+    fragments: tuple[_SpanFragment, ...],
+) -> tuple[tuple[tuple[_SpanFragment, ...], tuple[str, ...]], ...]:
+    if not fragments:
+        return ()
+    context = _cluster_context(document, fragments)
+    parent = list(range(len(fragments)))
+    members: dict[int, set[int]] = {index: {index} for index in range(len(fragments))}
+    reasons: dict[int, set[str]] = {index: set() for index in range(len(fragments))}
+
+    def find(value: int) -> int:
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = parent[value]
+        return value
+
+    def cluster_proposals(root: int) -> tuple[InstrumentFieldProposal, ...]:
+        return tuple(
+            proposal
+            for index in members[root]
+            for proposal in fragments[index].proposals
+        )
+
+    edges: list[tuple[int, int, int, str]] = []
+    adjacency: dict[int, list[tuple[int, int]]] = {index: [] for index in range(len(fragments))}
+    for left_index in range(len(fragments)):
+        for right_index in range(left_index + 1, len(fragments)):
+            score, reason = _pair_link(fragments[left_index], fragments[right_index], context)
+            if score >= 70 and reason:
+                edges.append((score, left_index, right_index, reason))
+                adjacency[left_index].append((score, right_index))
+                adjacency[right_index].append((score, left_index))
+
+    ambiguous_edges: set[tuple[int, int]] = set()
+    for index, neighbors in adjacency.items():
+        if len(neighbors) < 2:
+            continue
+        best_score = max(score for score, _ in neighbors)
+        best = [other for score, other in neighbors if score == best_score]
+        if len(best) < 2:
+            continue
+        if any(
+            _proposal_conflict(fragments[a].proposals, fragments[b].proposals)
+            for offset, a in enumerate(best)
+            for b in best[offset + 1 :]
+        ):
+            for other in best:
+                ambiguous_edges.add(tuple(sorted((index, other))))
+
+    for score, left_index, right_index, reason in sorted(
+        edges,
+        key=lambda item: (-item[0], item[1], item[2], item[3]),
+    ):
+        if tuple(sorted((left_index, right_index))) in ambiguous_edges:
+            continue
+        left_root = find(left_index)
+        right_root = find(right_index)
+        if left_root == right_root:
+            reasons[left_root].add(reason)
+            continue
+        if _proposal_conflict(cluster_proposals(left_root), cluster_proposals(right_root)):
+            continue
+        if min(members[left_root]) > min(members[right_root]):
+            left_root, right_root = right_root, left_root
+        parent[right_root] = left_root
+        members[left_root].update(members.pop(right_root))
+        reasons[left_root].update(reasons.pop(right_root))
+        reasons[left_root].add(reason)
+
+    output: list[tuple[tuple[_SpanFragment, ...], tuple[str, ...]]] = []
+    for root in sorted(members, key=lambda item: min(fragments[index].order for index in members[item])):
+        cluster = tuple(sorted((fragments[index] for index in members[root]), key=lambda item: item.order))
+        output.append((cluster, tuple(sorted(reasons[root]))))
+    return tuple(output)
+
+
+def _unique_proposals(
+    proposals: Iterable[InstrumentFieldProposal],
+) -> tuple[InstrumentFieldProposal, ...]:
+    output: list[InstrumentFieldProposal] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for item in proposals:
+        key = (
+            item.field,
+            repr(item.value),
+            item.confidence,
+            item.source_span_id,
+            item.basis,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(item)
+    return tuple(output)
+
+
+def _candidate_name_and_type(
+    proposals: tuple[InstrumentFieldProposal, ...],
+    document: FilingDocument,
+) -> tuple[str, str | None]:
+    explicit_note_names = [
+        str(item.value)
+        for item in proposals
+        if item.field == "name" and item.basis == "explicit note title with coupon and due year"
+    ]
+    facility_names = [
+        str(item.value)
+        for item in proposals
+        if item.field == "name" and item.basis == "facility name phrase"
+    ]
+    fallback_names = [str(item.value) for item in proposals if item.field == "name"]
+    name = (
+        explicit_note_names[0]
+        if explicit_note_names
+        else facility_names[0]
+        if facility_names
+        else fallback_names[0]
+        if fallback_names
+        else document.description or document.document
+    )
+
+    high_types = [str(item.value) for item in proposals if item.field == "instrument_type" and item.confidence == "high"]
+    other_types = [str(item.value) for item in proposals if item.field == "instrument_type"]
+    instrument_type = high_types[0] if high_types else (other_types[0] if other_types else _infer_instrument_type(name, ""))
+    return name, instrument_type
+
+
+def _template_for_cluster(
+    document: FilingDocument,
+    proposals: tuple[InstrumentFieldProposal, ...],
+    source_span_ids: tuple[str, ...],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    name, instrument_type = _candidate_name_and_type(proposals, document)
+    template: dict[str, Any] = {
+        "as_of_date": document.filing_date.isoformat(),
+        "source_accession": document.source_accession,
+        "name": name,
+        "instrument_type": instrument_type,
+        "principal": None,
+        "maturity_date": None,
+        "maturity_year": None,
+        "coupon_pct": None,
+        "benchmark": None,
+        "spread_bps": None,
+        "seniority": None,
+        "secured": None,
+        "currency": "USD",
+        "cusip": None,
+        "isin": None,
+        "commitment": None,
+        "drawn": None,
+        "available": None,
+        "source_refs": list(source_span_ids),
+        "notes": ["review all deterministic field proposals against every cited SEC exhibit span before ledger ingestion"],
+    }
+    warnings: list[str] = []
+    for field in template:
+        if field in {"as_of_date", "source_accession", "name", "instrument_type", "currency", "source_refs", "notes"}:
+            continue
+        values = _proposal_values(proposals, field, confidence="high")
+        if len(values) == 1:
+            template[field] = next(iter(values))
+        elif len(values) > 1:
+            warnings.append(
+                f"cluster contains conflicting high-confidence {field} proposals; snapshot field left unresolved"
+            )
+    return template, tuple(warnings)
+
+
 def extract_source_candidates(
     document_text: str,
     document: FilingDocument,
@@ -427,12 +805,13 @@ def extract_source_candidates(
     lower = text.lower()
     if not any(term in lower for term in _DEBT_TEXT_TERMS) and not _NOTES_TITLE_RE.search(text) and not _FACILITY_RE.search(text):
         return (), ()
+    if max_candidates <= 0:
+        return (), ()
 
-    spans: list[InstrumentSourceSpan] = []
-    candidates: list[DebtInstrumentSourceCandidate] = []
-    seen_keys: set[tuple[str, str]] = set()
+    fragments: list[_SpanFragment] = []
+    max_fragments = max(40, max_candidates * 8)
     for block in _candidate_blocks(text):
-        span_id = f"{document.source_accession}:{document.sequence or 0}:s{len(spans) + 1}"
+        span_id = f"{document.source_accession}:{document.sequence or 0}:s{len(fragments) + 1}"
         proposals = _proposals_for_block(span_id, block, document)
         if not proposals:
             continue
@@ -445,40 +824,33 @@ def extract_source_candidates(
             description=document.description,
             text=block,
         )
-        name = next((str(item.value) for item in proposals if item.field == "name"), document.description or document.document)
-        instrument_type = next((str(item.value) for item in proposals if item.field == "instrument_type"), "")
-        dedupe_key = (name.lower().strip(), instrument_type.lower().strip())
-        if dedupe_key in seen_keys:
-            continue
-        seen_keys.add(dedupe_key)
-        spans.append(span)
+        fragments.append(_SpanFragment(span=span, proposals=proposals, order=len(fragments)))
+        if len(fragments) >= max_fragments:
+            break
 
-        template: dict[str, Any] = {
-            "as_of_date": document.filing_date.isoformat(),
-            "source_accession": document.source_accession,
-            "name": name,
-            "instrument_type": instrument_type or None,
-            "principal": None,
-            "maturity_date": None,
-            "maturity_year": None,
-            "coupon_pct": None,
-            "benchmark": None,
-            "spread_bps": None,
-            "seniority": None,
-            "secured": None,
-            "currency": "USD",
-            "cusip": None,
-            "isin": None,
-            "commitment": None,
-            "drawn": None,
-            "available": None,
-            "source_refs": [span_id],
-            "notes": ["review all deterministic field proposals against the cited SEC exhibit span before ledger ingestion"],
-        }
-        for proposal in proposals:
-            if proposal.confidence == "high" and proposal.field in template:
-                template[proposal.field] = proposal.value
+    clustered = _cluster_fragments(document, tuple(fragments))[:max_candidates]
+    candidates: list[DebtInstrumentSourceCandidate] = []
+    selected_spans: list[InstrumentSourceSpan] = []
+    seen_span_ids: set[str] = set()
+    for cluster, basis in clustered:
+        source_span_ids = tuple(fragment.span.span_id for fragment in cluster)
+        proposals = _unique_proposals(
+            proposal
+            for fragment in cluster
+            for proposal in fragment.proposals
+        )
+        template, template_warnings = _template_for_cluster(document, proposals, source_span_ids)
+        for fragment in cluster:
+            if fragment.span.span_id not in seen_span_ids:
+                selected_spans.append(fragment.span)
+                seen_span_ids.add(fragment.span.span_id)
 
+        warnings = ["candidate fields are navigation/extraction aids, not confirmed legal terms"]
+        if len(cluster) > 1:
+            warnings.append(
+                f"clustered {len(cluster)} source spans within one SEC exhibit; verify the shared instrument identity before ledger ingestion"
+            )
+        warnings.extend(template_warnings)
         candidates.append(
             DebtInstrumentSourceCandidate(
                 candidate_id=f"{document.source_accession}:{document.sequence or 0}:c{len(candidates) + 1}",
@@ -488,14 +860,14 @@ def extract_source_candidates(
                 document_type=document.document_type,
                 document_description=document.description,
                 proposals=proposals,
-                source_span_ids=(span_id,),
+                source_span_ids=source_span_ids,
                 snapshot_template=template,
-                warnings=("candidate fields are navigation/extraction aids, not confirmed legal terms",),
+                warnings=tuple(dict.fromkeys(warnings)),
+                cluster_status="linked_spans" if len(cluster) > 1 else "single_span",
+                cluster_basis=basis,
             )
         )
-        if len(candidates) >= max_candidates:
-            break
-    return tuple(spans), tuple(candidates)
+    return tuple(selected_spans), tuple(candidates)
 
 
 def build_sec_instrument_packet(
@@ -566,6 +938,7 @@ def build_instrument_verification_task(packet: SecInstrumentPacket) -> AgentTask
             f"Do not use information published after {packet.analysis_date.isoformat()}.",
             "Treat every deterministic field proposal as unconfirmed until its cited SEC exhibit span supports the exact instrument and term.",
             "Do not merge two instruments merely because their names are similar; preserve explicit CUSIP/ISIN when available.",
+            "When one candidate cites multiple source spans, verify that the cluster evidence actually refers to one legal instrument before retaining merged fields.",
             "Separate principal, commitment, drawn amount and availability; do not substitute one for another.",
             "Return unresolved fields as null instead of guessing.",
         ),
@@ -585,7 +958,7 @@ def instrument_verification_template(packet: SecInstrumentPacket) -> dict[str, A
         "instruments": [dict(candidate.snapshot_template) for candidate in packet.candidates],
         "unresolved": [],
         "warnings": [
-            "Delete duplicate candidate rows and verify every retained field against source_refs before using this file with distressed-equity-debt-ledger."
+            "Delete duplicate candidate rows and verify every retained field and multi-span cluster against source_refs before using this file with distressed-equity-debt-ledger."
         ],
     }
 
