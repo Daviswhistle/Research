@@ -27,7 +27,7 @@ from .legal_name_alias import (
     legal_name_alias_graph_to_dict,
 )
 from .market import HistoricalMarketProvider, market_snapshot
-from .named_entity_closure import close_named_entity_cross_cik
+from .named_entity_closure import close_named_entity_fixed_point
 from .named_entity_contracts import (
     named_entity_contract_graph_to_dict,
     resolve_named_entity_contracts,
@@ -266,6 +266,7 @@ def build_research_bundle(
             warnings.extend(legal_graph_warnings)
 
             foreign_expansion = None
+            named_fixed_point_iterations = None
             if resolve_contract_identity_references:
                 foreign_expansion = expand_foreign_contract_identities(
                     sec_client,
@@ -298,16 +299,13 @@ def build_research_bundle(
                     contract_days_after_execution=contract_days_after_execution,
                     max_candidates_per_exhibit=max_instrument_candidates_per_exhibit,
                 )
-                instrument_packet = named_expansion.packet
-                named_entity_contract_graph_payload = named_entity_contract_graph_to_dict(
-                    named_expansion.graph
-                )
                 warnings.extend(named_expansion.graph.warnings)
 
-                named_closure = close_named_entity_cross_cik(
+                named_fixed = close_named_entity_fixed_point(
                     sec_client,
                     cross_expanded=cross_expanded,
                     named_expansion=named_expansion,
+                    initial_source_nodes=named_sources,
                     legal_name_graphs=legal_graphs,
                     existing_foreign_expansion=foreign_expansion,
                     max_depth=reference_depth,
@@ -317,18 +315,27 @@ def build_research_bundle(
                     contract_days_after_execution=contract_days_after_execution,
                     max_candidates_per_exhibit=max_instrument_candidates_per_exhibit,
                 )
-                cross_expanded = named_closure.cross_expanded
+                cross_expanded = named_fixed.cross_expanded
                 instrument_packet = cross_expanded.packet
-                legal_graphs = tuple(named_closure.legal_name_graphs)
-                foreign_expansion = named_closure.foreign_expansion
-                warnings.extend(named_closure.warnings)
+                legal_graphs = tuple(named_fixed.legal_name_graphs)
+                foreign_expansion = named_fixed.foreign_expansion
+                named_expansion = named_fixed.named_expansion
+                named_fixed_point_iterations = named_fixed.iterations
+                named_entity_contract_graph_payload = named_entity_contract_graph_to_dict(
+                    named_expansion.graph
+                )
+                warnings.extend(named_fixed.warnings)
 
-            # Serialize only after all foreign and named-entity closure passes so
-            # top-level resolutions/entities/documents match the final packet.
+            # Serialize only after all foreign and alternating named/explicit closure
+            # passes so top-level provenance matches the final packet.
             cross_cik_graph_payload = cross_cik_graph_to_dict(cross_expanded.cross_cik_graph)
             cross_cik_graph_payload["legal_name_alias_graphs"] = [
                 legal_name_alias_graph_to_dict(item) for item in legal_graphs
             ]
+            if named_fixed_point_iterations is not None:
+                cross_cik_graph_payload["named_entity_fixed_point_iterations"] = (
+                    named_fixed_point_iterations
+                )
             if foreign_expansion is not None:
                 foreign_payload = foreign_contract_expansion_to_dict(foreign_expansion)
                 cross_cik_graph_payload["foreign_contract_graphs"] = foreign_payload["graphs"]
@@ -464,6 +471,11 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
     named_resolved = sum(
         1 for item in named_resolutions if item.get("status") == "resolved_named_entity_contract"
     )
+    named_iterations = (
+        cross_graph.get("named_entity_fixed_point_iterations")
+        if isinstance(cross_graph, dict)
+        else None
+    )
     lines = [
         f"# {bundle.company_name} ({bundle.ticker or 'CIK'}) research workspace",
         "",
@@ -483,6 +495,11 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
         f"- Cross-CIK legal-name graphs frozen: {len(cross_name_graphs)}",
         f"- Foreign-CIK contract graphs: {len(foreign_contract_graphs)} ({foreign_contract_resolved} locator-less contracts resolved)",
         f"- Named external-entity contract resolutions: {len(named_resolutions)} ({named_resolved} resolved)",
+        *(
+            [f"- Alternating named/explicit closure iterations: {named_iterations}"]
+            if named_iterations is not None
+            else []
+        ),
         f"- Explicit legal-entity graph: {len(entity_nodes)} entities / {len(entity_roles)} roles / {len(entity_relations)} relations",
         f"- Cutoff share price: {draft.get('capital_structure', {}).get('current_price')}",
         "",
@@ -491,7 +508,7 @@ def render_research_summary(bundle: ResearchBundle, merged: dict[str, Any] | Non
         "1. Review `legal_name_alias_graph.json`; only cutoff-safe SEC rename evidence can bridge legal names.",
         "2. Review filing-to-filing capital-stack changes against source filings.",
         "3. Review the source-document graph; inspect unresolved/ambiguous locator and contract-identity edges.",
-        "4. Review `cross_cik_graph.json`; explicit foreign CIK traversal, foreign legal-name graphs, foreign locator-less contracts, and named-entity fallback provenance are frozen separately.",
+        "4. Review `cross_cik_graph.json`; explicit foreign CIK traversal, foreign legal-name graphs, foreign locator-less contracts, and alternating named-entity provenance are frozen separately.",
         "5. Review `debt_instrument_template.json`; verify/delete candidate fields against cited exhibit spans.",
         "6. Feed verified snapshots to `distressed-equity-debt-ledger` for stable instrument identity and amendment tracking.",
         "7. Have screening agents return the supplied structured result templates.",
