@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import date
-from typing import Any, Iterable
+from typing import Any
 
 from .sec_instruments import FilingDocument, SecInstrumentPacket
 
@@ -163,3 +163,39 @@ def multimodal_source_task_to_dict(task: MultimodalSourceTask) -> dict[str, Any]
     payload = asdict(task)
     payload["analysis_date"] = task.analysis_date.isoformat()
     return payload
+
+
+def multimodal_source_manifest(packet: SecInstrumentPacket) -> dict[str, Any]:
+    tasks = build_multimodal_source_tasks(packet)
+    return {
+        "strategy": "read_source_first_structure_on_demand",
+        "task_count": len(tasks),
+        "tasks": [
+            {
+                "task": multimodal_source_task_to_dict(task),
+                "result_template": multimodal_source_result_template(task),
+            }
+            for task in tasks
+        ],
+        "notes": [
+            "Multimodal reading is for source understanding and evidence-backed findings, not bulk OCR normalization.",
+            "Only minimal engine-facing patches should be structured after a material finding is established."
+        ],
+    }
+
+
+def install_multimodal_source_manifest(module: Any) -> None:
+    """Attach visual-source reading tasks to every serialized SEC instrument packet."""
+
+    if getattr(module, "_multimodal_source_manifest_installed", False):
+        return
+    original = module.sec_instrument_packet_to_dict
+
+    def serialize_with_multimodal_manifest(packet: SecInstrumentPacket) -> dict[str, Any]:
+        payload = original(packet)
+        payload["multimodal_source_reading"] = multimodal_source_manifest(packet)
+        return payload
+
+    serialize_with_multimodal_manifest.__name__ = "sec_instrument_packet_to_dict"
+    module.sec_instrument_packet_to_dict = serialize_with_multimodal_manifest
+    module._multimodal_source_manifest_installed = True
