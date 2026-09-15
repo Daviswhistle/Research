@@ -158,7 +158,7 @@ resolved_named_entity_contract
 
 이 fallback은 explicit SEC locator가 아니다.
 
-따라서 성공해도 top-level explicit cross-CIK resolution을:
+따라서 성공해도 name-origin 경계를:
 
 ```text
 resolved_cross_cik
@@ -180,7 +180,7 @@ named_entity_contract_graph.json
 
 ## Debt candidate flow
 
-유일하게 확인된 exhibit는 기존 source-backed debt pipeline으로만 들어간다.
+유일하게 확인된 exhibit는 기존 source-backed debt pipeline으로 들어간다.
 
 ```text
 confirmed external contract exhibit
@@ -203,9 +203,10 @@ Named-entity resolution 자체는 debt principal, commitment, maturity 등을 au
 3. explicit cross-CIK locator
 4. foreign-CIK locator-less contract + fixed-point closure
 5. source-confirmed named-entity contract fallback
+6. named-resolved exhibit에서 explicit cross-CIK closure 재시작
 ```
 
-따라서 이름 기반 후보 생성은 마지막 fallback이며 explicit provenance를 대체하지 않는다.
+5번의 이름 기반 후보 생성은 explicit provenance를 대체하지 않는다. 6번에서 새 `resolved_cross_cik`가 생기는 경우는 **이미 확인된 exhibit 안에 실제 SEC Archives / CIK / accession locator가 존재할 때뿐**이다.
 
 ## Depth
 
@@ -218,6 +219,46 @@ global_depth = entry_global_depth + local_node.depth
 ```
 
 를 사용한다. `reference_depth` 밖의 node는 named-entity scan 대상이 아니다.
+
+Named-entity 경계 자체도 한 depth를 소비한다.
+
+```text
+root source                              depth 0
+  -> name-confirmed target exhibit       depth 1
+  -> explicit foreign SEC locator        depth 2
+  -> foreign locator-less old contract   depth 3
+```
+
+`close_named_entity_cross_cik()`는 name-confirmed exhibit를 depth `source_depth + 1`의 synthetic seed로 만들어 기존 explicit cross-CIK resolver와 foreign fixed-point closure를 재사용한다.
+
+## Named-entity → explicit cross-CIK restart
+
+유일하게 확인된 named-entity exhibit는 debt extraction에서 끝나지 않는다. 그 exhibit가 새로운 명시적 SEC locator를 포함하면 다시 graph closure의 source가 된다.
+
+```text
+name-only party
+    -> source-date CIK confirmation
+    -> unique historical contract exhibit
+    -> explicit SEC Archives / CIK / accession reference
+    -> resolved_cross_cik
+    -> foreign same-CIK source graph
+    -> foreign locator-less contract fallback
+    -> bounded fixed point
+```
+
+중요한 provenance 구분:
+
+- `root -> named target`은 `resolved_named_entity_contract`
+- `named target exhibit -> explicit foreign target`은 `resolved_cross_cik`
+
+따라서 이름 추론을 explicit locator처럼 가장하지 않는다.
+
+Closure가 끝난 뒤 `cross_cik_graph.json`은 **최종 `cross_expanded.cross_cik_graph`에서 다시 직렬화**한다. 초기 cross graph를 미리 직렬화한 뒤 closure 결과를 일부 nested field로만 덧붙이지 않으므로, closure에서 새로 생긴 top-level `references`, `resolutions`, `entity_nodes`, `resolved_documents`가 누락되지 않는다.
+
+동일 동작은 다음 두 진입점 모두에 적용된다.
+
+- `distressed-equity-research`
+- `distressed-equity-sec-instruments`
 
 ## Coverage improvement
 
@@ -238,23 +279,9 @@ global_depth = entry_global_depth + local_node.depth
 - source contract가 약칭/trade name만 쓰고 legal name을 쓰지 않은 경우
 - source-date legal-name evidence가 최근 complete-submission header 범위 밖에 있어 확인되지 않는 경우
 - target filer가 public EDGAR filing history를 갖지 않아 contract confirmation이 불가능한 경우
+- closure 이후 새 문서에 또 다른 **name-only** 외부 법인이 등장하는 경우는 현재 같은 iteration 안에서 named resolver를 재호출하지 않음
 
-이 경계는 fuzzy web/company search로 메우지 않는다.
-
-## Next graph-closure phase
-
-Named-entity resolver가 유일하게 확인한 새 exhibit는 현재 debt source packet에는 합쳐진다. 하지만 그 exhibit 자체가 새로운 명시적 SEC Archives URL / CIK / accession을 포함할 경우, 그 문서를 seed로 explicit cross-CIK closure를 다시 실행하지는 않는다.
-
-다음 단계는:
-
-```text
-named-entity unique contract exhibit
-    -> explicit cross-CIK scan
-    -> foreign entry
-    -> same exact global-depth / alias / locator-less closure rules
-```
-
-로 재진입시키는 것이다. 이때도 name-origin provenance와 explicit locator provenance는 구분해 보존해야 한다.
+마지막 항목은 explicit locator closure와 의도적으로 구분한다. 현재 구현은 사용자가 요청한 `name-only -> confirmed contract -> explicit locator -> ...` 체인을 닫지만, 무제한 name-only/name-only 재귀는 허용하지 않는다.
 
 ## Safety properties
 
@@ -266,15 +293,18 @@ named-entity unique contract exhibit
 - source-date legal-name confirmation 필요
 - contract identity + party hard-filter 필요
 - 복수 결과는 ambiguous
-- explicit cross-CIK provenance와 별도 보존
+- name-origin provenance와 explicit cross-CIK provenance를 별도 보존
+- named hop과 explicit hop 모두 동일 global-depth budget을 소비
 - resolved exhibit도 authoritative debt row로 직접 승격하지 않음
+- closure 이후 최종 cross graph를 재직렬화해 provenance 누락 방지
 
-현재 다음 구조가 유지된다.
+현재 구조는 다음과 같다.
 
 ```text
 SEC cumulative all-CIK candidate
     -> source-date SEC identity confirmation
     -> unique historical contract confirmation
+    -> explicit cross-CIK restart when present
     -> source-backed debt extraction
 ```
 
