@@ -2,7 +2,7 @@
 
 ## 목적
 
-Debt exhibit는 prose만 있는 것이 아니다. 다음처럼 표의 행/열 관계 자체가 instrument identity와 term association을 결정하는 경우가 많다.
+Debt exhibit는 prose만 있는 것이 아니다. 표의 행/열 관계 자체가 instrument identity와 term association을 결정하는 경우가 많다.
 
 ```text
 Instrument                               Principal ($mm)   Maturity       Coupon   CUSIP
@@ -10,13 +10,14 @@ Instrument                               Principal ($mm)   Maturity       Coupon
 6.00% Senior Secured Notes due 2030      400               2030-06-15     6.00%    987654321
 ```
 
-이 표를 단순 text로 flatten하면 `$500m`과 두 번째 CUSIP을 잘못 연결하는 false association이 생길 수 있다.
+이를 단순 text로 flatten하면 `$500m`과 두 번째 CUSIP을 잘못 연결하는 false association이 생길 수 있다.
 
-따라서 structured extractor의 기본 원칙은 다음과 같다.
+현재 구조화 경로는 다음처럼 나뉜다.
 
 ```text
-HTML table -> row / column 구조 보존
-PDF/image   -> text처럼 강제 해석하지 않음
+HTML table      -> DOM row / column 구조 보존
+native-text PDF -> text-matrix x/y 좌표 구조 보존
+scanned/image   -> 자동 추출하지 않고 visual/OCR 경계로 보류
 ```
 
 ## HTML table pipeline
@@ -34,9 +35,9 @@ SEC exhibit HTML
     -> remaining non-table prose만 기존 extractor로 전달
 ```
 
-Table body는 prose extractor에서 제거한다. 따라서 한 표가 한 번은 row-aware candidate로, 다시 한 번은 flattened prose candidate로 중복 처리되지 않는다.
+Table body는 prose extractor에서 제거한다. 따라서 한 표가 row-aware candidate와 flattened prose candidate로 중복 처리되지 않는다.
 
-## Table source span
+## HTML table source span
 
 한 debt row는 다음과 같은 source span ID를 가진다.
 
@@ -107,22 +108,18 @@ June 15, 2028
 
 ## Row association safety
 
-자동 proposal 결합은 **같은 table row 내부에서만** 발생한다.
-
-즉 다음은 허용되지 않는다.
+자동 proposal 결합은 **같은 structural row 내부에서만** 발생한다.
 
 ```text
-row 1 principal -> row 2 CUSIP
-row 1 coupon    -> row 2 maturity
+row 1 principal -> row 2 CUSIP    # 금지
+row 1 coupon    -> row 2 maturity # 금지
 ```
 
 각 row candidate의 `source_refs`는 정확히 그 row source span을 가리킨다.
 
-## Multi-row headers
+## Multi-row HTML headers
 
 `rowspan` / `colspan`을 grid로 확장하고, 연속된 `<th>` header row를 column별로 결합한다.
-
-예:
 
 ```text
 Instrument | Terms colspan=2 | CUSIP
@@ -140,26 +137,85 @@ CUSIP
 
 처럼 column identity를 유지한다.
 
-## Prose coexistence
+## Native-text PDF pipeline
 
-표 밖의 prose는 기존 distant-span clustering extractor로 계속 처리한다.
+PDF는 `response.text`로 decode하지 않는다. Binary bytes를 `pypdf`로 읽고 native text objects의 page/x/y/font-size를 보존한다.
 
 ```text
-HTML
-  -> tables: row-aware extractor
-  -> outside prose: existing source-span clustering
+PDF bytes
+  -> text matrix fragments
+  -> y-axis visual rows
+  -> x-axis header anchors
+  -> midpoint column boundaries
+  -> same-layout-row candidate
 ```
 
-따라서 table 구조를 보존하면서 기존 CUSIP/ISIN, note-title, facility-label, distant-span logic을 잃지 않는다.
+PDF table source ref:
+
+```text
+<accession>:<sequence>:p<page>:r<row>
+```
+
+Candidate provenance:
+
+```text
+cluster_status = pdf_layout_row
+cluster_basis = [same_native_pdf_layout_row, coordinate_mapped_columns, pypdf_text_matrix]
+```
+
+Table이 아닌 native PDF prose는 page-local coordinate order로 재구성하고 기존 debt block/clustering logic을 적용한다.
+
+```text
+<accession>:<sequence>:p<page>:s<span>
+cluster_status = pdf_native_prose | pdf_native_prose_linked
+```
+
+자세한 규칙은 [`NATIVE_PDF_DEBT_EXTRACTION.md`](NATIVE_PDF_DEBT_EXTRACTION.md)를 참고한다.
+
+## Graph / closure consistency
+
+Native PDF 지원은 initial SEC packet에만 적용되지 않는다.
+
+Package bootstrap에서 downstream 모듈 import 전에 document-aware helper를 설치하므로 다음 경로가 동일한 PDF semantics를 쓴다.
+
+```text
+initial SEC packet
+source-document graph
+locator-less contract graph
+foreign closure
+named-entity resolution
+```
+
+Native PDF source는 string-compatible payload로 source-reference/contract parser에 전달되지만, 그 payload는 원본 PDF bytes를 함께 보존한다. Debt candidate 추출 단계에서는 원본 bytes로 coordinate layout을 다시 구축한다.
 
 ## PDF / image safety boundary
 
-현재 dependency-free pipeline은 PDF/image binary를 자동 OCR/PDF parser로 해석하지 않는다.
+`.pdf`는 먼저 native-text probe를 수행한다.
 
-다음 파일은 text fetch 전에 defer한다.
+Native text가 충분하면:
 
 ```text
-.pdf
+PDF_NATIVE_TEXT_EXTRACTED|...
+```
+
+Native text가 없거나 너무 sparse하면:
+
+```text
+VISUAL_EXTRACTION_REQUIRED|...|media_type=pdf|...
+PDF_NATIVE_TEXT_UNAVAILABLE|...
+```
+
+Invalid/failed PDF parsing은:
+
+```text
+PDF_NATIVE_TEXT_EXTRACTION_FAILED|...
+```
+
+으로 남긴다.
+
+다음 image format은 여전히 자동 OCR하지 않는다.
+
+```text
 .png
 .jpg / .jpeg
 .gif
@@ -171,31 +227,20 @@ GRAPHIC document type
 
 또한 HTML wrapper 안에 image만 있고 visible text가 너무 적은 exhibit도 defer한다.
 
-Frozen packet warning은 machine-readable prefix를 사용한다.
-
-```text
-VISUAL_EXTRACTION_REQUIRED|
-accession=...|
-document=...|
-document_type=...|
-media_type=pdf|image|image_heavy_html|
-url=...|
-reason=...
-```
-
-중요한 점은 **PDF를 response.text로 decode한 뒤 regex extraction하지 않는 것**이다. Binary/visual document는 후속 visual/PDF extraction stage가 준비될 때까지 unresolved evidence로 남긴다.
+중요한 점은 **PDF/image bytes를 일반 string으로 decode한 뒤 regex extraction하지 않는 것**이다.
 
 ## Verification boundary
 
-HTML table row candidate도 authoritative debt row가 아니다.
+HTML/PDF structured candidate도 authoritative debt row가 아니다.
 
 Verification 단계에서는 다음을 다시 확인해야 한다.
 
 1. header가 실제 해당 column의 의미를 나타내는지
 2. header unit이 row value에 적용되는지
-3. rowspan/colspan으로 표현된 header가 올바르게 해석됐는지
-4. row가 instrument row인지 subtotal/summary row인지
-5. candidate field가 정확한 source row와 연결되는지
+3. HTML rowspan/colspan 또는 PDF x/y reconstruction이 올바른지
+4. wrapped/multi-line PDF cell이 다른 row로 잘못 분리되지 않았는지
+5. row가 instrument row인지 subtotal/summary row인지
+6. candidate field가 정확한 source row/page와 연결되는지
 
 확인 후에만 stable debt ledger input으로 승격한다.
 
@@ -203,8 +248,9 @@ Verification 단계에서는 다음을 다시 확인해야 한다.
 
 1. Transposed table(행이 metric, 열이 instrument) 자동 해석은 아직 하지 않는다.
 2. Footnote marker가 column 의미를 바꾸는 복잡한 표는 자동 판단하지 않는다.
-3. PDF의 native text layer / embedded table extraction은 아직 구현하지 않았다.
-4. Scanned PDF/image OCR은 아직 구현하지 않았다.
-5. Separate exhibits 사이의 table-row evidence를 자동 merge하지 않는다.
+3. PDF multi-row/spanning header는 HTML rowspan/colspan만큼 강하게 재구성하지 않는다.
+4. Rotated/skewed PDF text는 좌표 reconstruction이 부정확할 수 있다.
+5. Scanned PDF/image OCR은 아직 구현하지 않았다.
+6. Separate exhibits 사이의 structured evidence를 자동 merge하지 않는다.
 
-현재 목표는 구조를 모르는 상태에서 aggressively 숫자를 뽑는 것보다, **HTML에서 신뢰할 수 있는 row/column association은 보존하고 visual source는 안전하게 unresolved로 남기는 것**이다.
+현재 목표는 aggressively 숫자를 뽑는 것보다, **source가 제공하는 구조 evidence가 충분할 때만 row/column association을 보존해 자동화하고 그렇지 않으면 unresolved로 남기는 것**이다.
