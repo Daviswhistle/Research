@@ -190,7 +190,59 @@ def seed_to_dict(seed: MarketDistressSeed) -> dict[str, object]:
     payload["security"]["end_date"] = (
         seed.security.end_date.isoformat() if seed.security.end_date else None
     )
-    payload["raw_price"]["date"] = seed.raw_price.date.isoformat()
-    payload["adjusted_price"]["date"] = seed.adjusted_price.date.isoformat()
-    payload["peak_adjusted_price"]["date"] = seed.peak_adjusted_price.date.isoformat()
+    for key in ("raw_price", "adjusted_price", "peak_adjusted_price"):
+        payload[key]["date"] = payload[key]["date"].isoformat()
     return payload
+
+
+def apply_market_seed_to_prefill(
+    research_packet: dict[str, object],
+    seed: MarketDistressSeed,
+) -> dict[str, object]:
+    """Merge market facts into a SEC prefill without inventing missing accounting data."""
+
+    packet = deepcopy(research_packet)
+    draft = packet.get("screening_candidate_draft")
+    if not isinstance(draft, dict):
+        raise ValueError("research packet lacks screening_candidate_draft")
+    capital = draft.get("capital_structure")
+    if not isinstance(capital, dict):
+        raise ValueError("screening candidate draft lacks capital_structure")
+
+    capital["current_price"] = seed.raw_price.close
+    draft["price_drawdown_from_peak"] = seed.adjusted_drawdown_from_peak
+    draft["price_drawdown_adjusted"] = True
+    metadata = draft.setdefault("metadata", {})
+    if isinstance(metadata, dict):
+        metadata["market_replay"] = {
+            "provider": seed.security.provider,
+            "security_id": seed.security.security_id,
+            "raw_price_date": seed.raw_price.date.isoformat(),
+            "adjusted_price_date": seed.adjusted_price.date.isoformat(),
+            "peak_adjusted_price": seed.peak_adjusted_price.close,
+            "peak_adjusted_price_date": seed.peak_adjusted_price.date.isoformat(),
+            "drawdown_basis": "split/dividend-adjusted price; not market-cap drawdown",
+        }
+
+    shares = capital.get("current_shares")
+    if isinstance(shares, (int, float)) and shares > 0:
+        packet.setdefault("market_context", {})
+        market_context = packet["market_context"]
+        if isinstance(market_context, dict):
+            market_context["cutoff_market_cap"] = seed.raw_price.close * float(shares)
+    packet.setdefault("market_context", {})
+    market_context = packet["market_context"]
+    if isinstance(market_context, dict):
+        market_context.update(seed_to_dict(seed))
+
+    unresolved = packet.get("unresolved_required_fields")
+    if isinstance(unresolved, list):
+        unresolved[:] = [
+            item
+            for item in unresolved
+            if item != "point-in-time share price and peak market capitalization"
+        ]
+        unresolved.append(
+            "prior peak market capitalization remains unresolved; adjusted price drawdown is only a distress proxy"
+        )
+    return packet
