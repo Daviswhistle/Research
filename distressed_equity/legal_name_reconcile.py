@@ -5,7 +5,7 @@ from datetime import date, datetime
 from typing import Any, Iterable
 
 from .contract_parties import normalize_party_name
-from .legal_name_alias import LegalNameAliasGraph, LegalNameRecord, LegalNameTransition, build_legal_name_alias_graph
+from .legal_name_alias import LegalNameAliasGraph, LegalNameRecord, LegalNameTransition, build_legal_name_alias_graph_from_submissions
 from .legal_name_header import CompleteSubmissionNameEvidence, fetch_complete_submission_name_evidence
 from .sec import SecClient, SecFiling, normalize_cik
 
@@ -33,6 +33,10 @@ class ReconciledLegalNameAliasGraph:
     comparisons: tuple[LegalNameSourceComparison, ...]
     header_evidence: tuple[CompleteSubmissionNameEvidence, ...]
     warnings: tuple[str, ...]
+    header_scan_status: str = "unspecified"
+    header_scan_filings_considered: int = 0
+    header_scan_filings_fetched: int = 0
+    header_scan_oldest_filing_on: date | None = None
 
     @property
     def alias_names(self) -> tuple[str, ...]:
@@ -155,10 +159,20 @@ def reconcile_legal_name_sources(graph: LegalNameAliasGraph, header_evidence: It
 
 
 def build_reconciled_legal_name_alias_graph(client: SecClient, *, cik: str | int, analysis_date: date, filings: Iterable[SecFiling] | None = None, header_filing_limit: int = 3) -> ReconciledLegalNameAliasGraph:
+    """Build the explicit fixed-limit reconciliation helper without double-reconciling.
+
+    The public `build_legal_name_alias_graph` adds adaptive historical scanning.
+    This helper retains the older fixed-limit behavior for callers/tests that need
+    an exact sample size.
+    """
     if header_filing_limit < 0:
         raise ValueError("header_filing_limit cannot be negative")
     cik10 = normalize_cik(cik)
-    graph = build_legal_name_alias_graph(client, cik=cik10, analysis_date=analysis_date)
+    graph = build_legal_name_alias_graph_from_submissions(
+        client.submissions(cik10),
+        cik=cik10,
+        analysis_date=analysis_date,
+    )
     if header_filing_limit == 0:
         return reconcile_legal_name_sources(graph, ())
     candidates = tuple(filings) if filings is not None else client.filings_as_of(cik10, analysis_date, forms=HEADER_FORMS)
@@ -171,9 +185,22 @@ def build_reconciled_legal_name_alias_graph(client: SecClient, *, cik: str | int
         except Exception as exc:
             warnings.append(f"failed complete-submission legal-name header lookup for {filing.accession_number}: {exc}")
     reconciled = reconcile_legal_name_sources(graph, evidence)
-    if not warnings:
-        return reconciled
-    return ReconciledLegalNameAliasGraph(reconciled.cik, reconciled.analysis_date, reconciled.canonical_name_as_of, reconciled.canonical_status, reconciled.records, reconciled.transitions, reconciled.comparisons, reconciled.header_evidence, tuple(dict.fromkeys(list(reconciled.warnings) + warnings)))
+    status = "fixed_limit_complete" if len(selected) == len(candidates) else "fixed_limit_sample"
+    return ReconciledLegalNameAliasGraph(
+        reconciled.cik,
+        reconciled.analysis_date,
+        reconciled.canonical_name_as_of,
+        reconciled.canonical_status,
+        reconciled.records,
+        reconciled.transitions,
+        reconciled.comparisons,
+        reconciled.header_evidence,
+        tuple(dict.fromkeys(list(reconciled.warnings) + warnings)),
+        status,
+        len(candidates),
+        len(evidence),
+        min((item.filing_date for item in evidence), default=None),
+    )
 
 
 def build_reconciled_legal_name_alias_graphs(client: SecClient, *, ciks: Iterable[str | int], analysis_date: date, existing: Iterable[ReconciledLegalNameAliasGraph] = (), header_filing_limit: int = 3):
