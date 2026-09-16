@@ -11,6 +11,15 @@ from .source_outcomes import CsvSourceBackedOutcomeIndex, SourceBackedOutcomeLab
 from .survival_features import CsvSurvivalFeatureIndex, FeatureDimension, feature_bucket
 
 
+_ALLOWED_FEATURE_DIMENSIONS = frozenset({
+    "liquidity_runway",
+    "nearest_maturity",
+    "covenant_headroom",
+    "net_leverage",
+    "impairment_type",
+})
+
+
 @dataclass(frozen=True)
 class WalkForwardPriorStratum:
     basis: str
@@ -217,6 +226,11 @@ def build_walk_forward_priors(
     dims = tuple(dimensions)
     if len(set(dims)) != len(dims):
         raise ValueError("walk-forward feature dimensions must be unique")
+    unknown_dims = sorted(set(dims) - _ALLOWED_FEATURE_DIMENSIONS)
+    if unknown_dims:
+        raise ValueError(
+            "unsupported walk-forward feature dimension(s): " + ", ".join(unknown_dims)
+        )
     if small_sample_n <= 0:
         raise ValueError("small_sample_n must be positive")
     if episode_gap_days < 0:
@@ -320,6 +334,7 @@ def build_walk_forward_priors(
             "same-security historical observations are grouped into connected episodes when every consecutive observation gap stays within episode_gap_days",
             "the earliest observed case represents each historical episode for calibration, while the full episode end date is retained for target self-exclusion",
             "same-security historical episodes ending inside the target episode gap are excluded from that target case's prior",
+            "feature dimensions are validated against the explicit supported set before any bucket construction",
             "raw empirical rates, resolved denominators, Wilson 95% intervals, and small-sample warnings are preserved; no LLM probability adjustment is applied",
         ),
     )
