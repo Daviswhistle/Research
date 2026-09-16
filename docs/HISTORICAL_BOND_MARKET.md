@@ -9,10 +9,10 @@ Distressed-equity 연구에서 주가 폭락만 보는 대신 **당시 채권시
 따라서 저장 계층을 분리한다.
 
 ```text
-verified stable debt identity (CUSIP / ISIN)
+source-verified stable debt identity (CUSIP / ISIN)
     -> historical bond market observation
        price (% par), yield, volume, date
-    -> matched Treasury benchmark / explicit benchmark
+    -> explicit benchmark or freshness-checked Treasury benchmark
     -> credit spread
     -> recovery-sensitive constant-hazard stress proxy
 ```
@@ -25,8 +25,19 @@ Bond market data는 **검증된 debt ledger의 explicit CUSIP/ISIN에만** 연�
 - note name similarity match 금지
 - maturity/coupon similarity만으로 market series 연결 금지
 - CUSIP/ISIN가 없으면 unresolved로 남김
+- provider가 반환한 observation은 요청한 CUSIP/ISIN 중 최소 하나와 exact match해야 함
+- 반환 row에 명시된 다른 CUSIP/ISIN가 요청 identity와 충돌하면 hard fail
 
-이 규칙은 SEC 문서의 instrument identity 오류가 시장 데이터까지 전파되는 것을 막는다.
+즉 built-in provider뿐 아니라 `HistoricalBondMarketProvider`를 구현한 외부 provider도 잘못된 security row를 stable ID에 붙일 수 없다.
+
+Workspace에서는 bond-market 실행 시 단순 수동 debt JSON fallback을 허용하지 않는다. frozen `debt_instrument_source_packet`과 verifier가 재오픈한 snapshot verification이 필요하며, snapshot 승인은 다음 두 fingerprint에 묶인다.
+
+```text
+frozen source-packet fingerprint
+exact finalized snapshot-row fingerprint
+```
+
+승인 후 principal, maturity, `as_of_date`, identifier 또는 cited evidence가 바뀌면 기존 승인은 무효다.
 
 ## Provider contract
 
@@ -95,6 +106,8 @@ FINRA TRACE는 transaction-level corporate-bond execution price/yield/volume의 
 
 원본 TRACE의 거래가 여러 건이면 사용자는 목적에 따라 daily VWAP, 마지막 disseminated trade 등 aggregation policy를 먼저 정해야 한다. Repository는 raw transaction rows를 임의로 closing price로 만들지 않는다.
 
+동일 채권·동일 날짜에 서로 다른 observation이 둘 이상 들어오면 hard fail한다. Exact duplicate만 collapse하며, transaction-level input의 daily aggregation은 upstream에서 명시적으로 수행해야 한다.
+
 ## Provider 2: EODHD
 
 `EodhdBondProvider`는 single-company deep dive용 targeted provider다.
@@ -111,6 +124,13 @@ FINRA TRACE는 transaction-level corporate-bond execution price/yield/volume의 
 EODHD_API_KEY
 ```
 
+EODHD bond adapter는 `.BOND` compatibility surface를 **strict하게** 다룬다.
+
+- stock-like `close`를 bond price로 reinterpret하지 않음
+- in-range row는 모두 explicit `price` + `yield` shape를 만족해야 함
+- valid row와 generic OHLC row가 섞인 partial response도 전체 거부
+- ISIN route가 incompatible response를 내고 CUSIP fallback이 empty여도 compatibility error를 숨기지 않음
+
 이 adapter는 대규모 historical universe replay용이 아니다. 그 용도는 TRACE/WRDS 같은 bulk export가 우선이다.
 
 ## Credit spread
@@ -125,6 +145,28 @@ EODHD_API_KEY
 ```
 
 Benchmark maturity가 year-only precision이면 그 사실을 warning으로 남긴다. 만기 자체가 없으면 Treasury tenor를 임의로 고르지 않는다.
+
+### Treasury benchmark freshness
+
+외부 Treasury curve는 미래값만 막는 것으로 충분하지 않다. 너무 오래된 과거 curve도 spread를 크게 왜곡할 수 있다.
+
+따라서 assessment는 `benchmark_days_stale`를 기록하고, 기본적으로 Treasury benchmark가 bond observation보다 **7일 초과** 오래됐으면:
+
+```text
+raw benchmark evidence: 보존
+spread_bps: unresolved
+implied_credit_risk: 계산하지 않음
+warning: stale benchmark 명시
+```
+
+기본값은 CLI에서 조절할 수 있다.
+
+```text
+standalone: --max-benchmark-staleness-days
+workspace:  --bond-max-benchmark-staleness-days
+```
+
+Observation 자체가 explicit `benchmark_yield_pct` 또는 provider `spread_bps`를 갖고 있으면 그 값을 우선하므로 외부 Treasury freshness gate가 필요하지 않다.
 
 ## Spread-implied credit-risk proxy
 
@@ -194,7 +236,8 @@ stale_bond_market_observation
 - peak 대비 price drawdown
 - 현재 yield - lookback 최저 yield
 - observation count
-- cutoff 대비 staleness days
+- cutoff 대비 bond observation staleness days
+- bond observation 대비 benchmark staleness days
 
 을 기록한다.
 
@@ -204,7 +247,15 @@ stale_bond_market_observation
 
 따라서 `price_on_or_before`처럼 마지막 값을 조용히 cutoff 값으로 취급하지 않고 `days_stale`를 기록한다. 기본 30일보다 오래됐으면 signal/warning을 붙인다.
 
-이 값은 데이터 누락이 아니라 실제 유동성 부족일 수도 있으므로 투자적으로도 유용한 정보다.
+Stale observation은 삭제하지 않는다. 실제 유동성 부족 자체가 투자적으로 중요한 정보일 수 있기 때문이다. 대신 workspace summary에서 다음을 분리한다.
+
+```text
+lookback 안에 observation이 있는 채권
+fresh observation으로 현재 stress를 셀 수 있는 채권
+stale observation이라 현재 stress headline에서 제외된 채권
+```
+
+따라서 months-old trade가 50 cents on par였다는 이유만으로 cutoff 현재의 `<80% par` headline count에 들어가지 않는다.
 
 ## Standalone CLI
 
@@ -216,6 +267,8 @@ distressed-equity-bond-market \
   --analysis-date 2022-12-31 \
   --provider csv \
   --bond-observations-csv trace_normalized.csv \
+  --max-staleness-days 30 \
+  --max-benchmark-staleness-days 7 \
   --output workspace/bond_market.json
 ```
 
@@ -226,12 +279,13 @@ EODHD_API_KEY=... distressed-equity-bond-market \
   --ledger workspace/debt_instrument_ledger.json \
   --analysis-date 2022-12-31 \
   --provider eodhd \
+  --max-benchmark-staleness-days 7 \
   --output workspace/bond_market.json
 ```
 
 ## Research workspace integration
 
-`distressed-equity-research`에서는 bond provider가 반드시 `--debt-instruments`와 함께 와야 한다.
+`distressed-equity-research`에서는 bond provider가 반드시 `--debt-instruments`와 함께 와야 하며, bond-market path에서는 frozen debt source packet과 fingerprint-bound verified snapshots가 필요하다.
 
 ```bash
 distressed-equity-research \
@@ -240,7 +294,9 @@ distressed-equity-research \
   --workspace ./work/TEST-2022-12-31 \
   --debt-instruments ./verified_debt.json \
   --bond-market-provider csv \
-  --bond-observations-csv ./trace_normalized.csv
+  --bond-observations-csv ./trace_normalized.csv \
+  --bond-max-staleness-days 30 \
+  --bond-max-benchmark-staleness-days 7
 ```
 
 생성:
@@ -251,7 +307,16 @@ bond_market.json
 summary.md
 ```
 
-Debt ledger를 다시 만들면 기존 `bond_market.json`은 자동 삭제된다. 새 stable IDs에 과거 가격 artifact가 잘못 붙어 남는 것을 막기 위해서다.
+Debt ledger를 다시 만들면 과거 stable-ID basis에 의존하는 derived artifact를 자동 무효화한다.
+
+```text
+debt_lineage.json
+debt_lineage_verification_template.json
+bond_market.json
+merged.json
+```
+
+새 stable IDs에 과거 lineage/market/merged 결과가 잘못 붙어 남는 것을 막기 위해서다.
 
 ## 투자 연구에서의 사용법
 
