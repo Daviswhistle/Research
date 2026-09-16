@@ -326,72 +326,88 @@ def read_trace_security_master_snapshot(
 def build_trace_security_master_resolver(
     events: Iterable[TraceSecurityEvent],
 ) -> TraceSecurityMasterResolver:
-    """Convert source-backed identity events into non-overlapping intervals."""
+    """Convert source-backed identity events into non-overlapping intervals.
+
+    Events on the same date are applied in the exact order supplied by the
+    source reader. This matters for chained same-day changes such as A->B->C:
+    B is an intermediate state, not an indefinitely active symbol. A later
+    source that reconfirms an unchanged Symbol/CUSIP splits provenance at that
+    source's availability date rather than being attached retroactively.
+    """
 
     by_date: dict[date, list[TraceSecurityEvent]] = {}
     for event in events:
         by_date.setdefault(event.effective_date, []).append(event)
 
-    # symbol -> (cusip, start, source refs)
+    # symbol -> (cusip, start, source refs available from start onward)
     active: dict[str, tuple[str, date, tuple[str, ...]]] = {}
     intervals: list[TraceSecurityIdentityInterval] = []
 
+    def close_symbol(symbol: str, expected_cusip: str | None, effective_date: date) -> None:
+        current = active.get(symbol)
+        if current is None:
+            return
+        current_cusip, started, refs = current
+        if expected_cusip is not None and current_cusip != expected_cusip:
+            raise ValueError(
+                f"TRACE Daily List close for {symbol} on {effective_date.isoformat()} names "
+                f"{expected_cusip} but active mapping is {current_cusip}"
+            )
+        if effective_date > started:
+            intervals.append(
+                TraceSecurityIdentityInterval(symbol, current_cusip, started, effective_date, refs)
+            )
+        active.pop(symbol, None)
+
+    def start_symbol(symbol: str, cusip: str, source_ref: str, effective_date: date) -> None:
+        current = active.get(symbol)
+        if current is None:
+            active[symbol] = (cusip, effective_date, (source_ref,))
+            return
+
+        current_cusip, started, current_refs = current
+        if current_cusip != cusip:
+            raise ValueError(
+                f"conflicting TRACE symbol/CUSIP starts for {symbol} on {effective_date.isoformat()}: "
+                f"{current_cusip} vs {cusip}; explicit close/change event is required"
+            )
+
+        # A new source can confirm an identity already active. Do not attach that
+        # future evidence to the earlier interval. Split at its availability date
+        # and carry both prior and newly available provenance only from then on.
+        if effective_date > started:
+            intervals.append(
+                TraceSecurityIdentityInterval(symbol, current_cusip, started, effective_date, current_refs)
+            )
+            active[symbol] = (
+                current_cusip,
+                effective_date,
+                tuple(dict.fromkeys((*current_refs, source_ref))),
+            )
+            return
+
+        # Multiple same-day sources for the same identity have the same daily
+        # availability boundary and can share provenance without backfilling.
+        active[symbol] = (
+            current_cusip,
+            started,
+            tuple(dict.fromkeys((*current_refs, source_ref))),
+        )
+
     for effective_date in sorted(by_date):
-        day_events = sorted(by_date[effective_date], key=lambda item: item.source_ref)
-        ends: dict[str, list[tuple[str | None, str]]] = {}
-        starts: dict[str, list[tuple[str, str]]] = {}
-        for event in day_events:
+        # Preserve reader/input order within the day. Sorting by a textual source
+        # reference can reorder row10 before row2 and break transition chains.
+        for event in by_date[effective_date]:
             if event.kind in {"delete", "change"} and event.old_symbol:
-                ends.setdefault(event.old_symbol, []).append((event.old_cusip, event.source_ref))
+                close_symbol(event.old_symbol, event.old_cusip, effective_date)
             if event.kind in {"add", "change", "snapshot"} and event.new_symbol and event.new_cusip:
-                starts.setdefault(event.new_symbol, []).append((event.new_cusip, event.source_ref))
-
-        for symbol, entries in ends.items():
-            explicit_cusips = {cusip for cusip, _ in entries if cusip is not None}
-            if len(explicit_cusips) > 1:
-                raise ValueError(
-                    f"conflicting TRACE Daily List old CUSIPs for {symbol} on {effective_date.isoformat()}: "
-                    f"{sorted(explicit_cusips)}"
-                )
-            current = active.get(symbol)
-            if current is None:
-                continue
-            current_cusip, started, refs = current
-            if explicit_cusips and current_cusip not in explicit_cusips:
-                raise ValueError(
-                    f"TRACE Daily List close for {symbol} on {effective_date.isoformat()} names "
-                    f"{sorted(explicit_cusips)} but active mapping is {current_cusip}"
-                )
-            if effective_date > started:
-                intervals.append(
-                    TraceSecurityIdentityInterval(symbol, current_cusip, started, effective_date, refs)
-                )
-            active.pop(symbol, None)
-
-        for symbol, entries in starts.items():
-            cusips = {cusip for cusip, _ in entries}
-            if len(cusips) != 1:
-                raise ValueError(
-                    f"conflicting TRACE symbol/CUSIP starts for {symbol} on {effective_date.isoformat()}: {sorted(cusips)}"
-                )
-            cusip = next(iter(cusips))
-            refs = tuple(sorted({ref for _, ref in entries}))
-            current = active.get(symbol)
-            if current is not None:
-                current_cusip, started, current_refs = current
-                if current_cusip != cusip:
-                    raise ValueError(
-                        f"TRACE Symbol {symbol} changes from {current_cusip} to {cusip} on "
-                        f"{effective_date.isoformat()} without an explicit close/change event"
-                    )
-                active[symbol] = (current_cusip, started, tuple(sorted(set(current_refs) | set(refs))))
-                continue
-            active[symbol] = (cusip, effective_date, refs)
+                start_symbol(event.new_symbol, event.new_cusip, event.source_ref, effective_date)
 
     for symbol, (cusip, started, refs) in active.items():
         intervals.append(TraceSecurityIdentityInterval(symbol, cusip, started, None, refs))
 
-    # Coalesce adjacent intervals only when the source-backed identity is unchanged.
+    # Preserve provenance boundaries. Adjacent intervals are coalesced only when
+    # both identity and evidence set are exactly unchanged.
     coalesced: list[TraceSecurityIdentityInterval] = []
     for row in sorted(intervals, key=lambda item: (item.trace_symbol, item.effective_from, item.effective_to or date.max)):
         if coalesced:
@@ -399,6 +415,7 @@ def build_trace_security_master_resolver(
             if (
                 previous.trace_symbol == row.trace_symbol
                 and previous.cusip == row.cusip
+                and previous.source_refs == row.source_refs
                 and previous.effective_to == row.effective_from
             ):
                 coalesced[-1] = TraceSecurityIdentityInterval(
@@ -406,7 +423,7 @@ def build_trace_security_master_resolver(
                     previous.cusip,
                     previous.effective_from,
                     row.effective_to,
-                    tuple(sorted(set(previous.source_refs) | set(row.source_refs))),
+                    previous.source_refs,
                 )
                 continue
         coalesced.append(row)
