@@ -601,12 +601,33 @@ def _secured_principal(
 ) -> float | None:
     values: list[float] = []
     for participant, snapshot in zip(participations, snapshots):
-        amount = _participant_amount(participant, snapshot)
-        if amount is None or snapshot.secured is None:
+        if snapshot.secured is None:
             return None
-        if snapshot.secured:
-            values.append(amount)
+        if snapshot.secured is False:
+            continue
+        amount = _participant_amount(participant, snapshot)
+        if amount is None:
+            return None
+        values.append(amount)
     return sum(values)
+
+
+def _event_currency(
+    event: DebtLineageEvent,
+    predecessor_snapshots: tuple[DebtInstrumentSnapshot, ...],
+    successor_snapshots: tuple[DebtInstrumentSnapshot, ...],
+) -> str | None:
+    currencies = {
+        str(snapshot.currency or "").strip().upper()
+        for snapshot in (*predecessor_snapshots, *successor_snapshots)
+        if str(snapshot.currency or "").strip()
+    }
+    if len(currencies) > 1:
+        raise ValueError(
+            f"{event.event_id}: mixed-currency lineage impacts are unsupported without an explicit FX conversion basis: "
+            + ", ".join(sorted(currencies))
+        )
+    return next(iter(currencies), None)
 
 
 def _impact_for_event(
@@ -641,6 +662,8 @@ def _impact_for_event(
         )
         if amount_warning:
             unresolved.append(amount_warning)
+
+    _event_currency(event, tuple(predecessor_snapshots), tuple(successor_snapshots))
 
     predecessor_principal = _sum_known(
         _participant_amount(participant, snapshot)
@@ -735,6 +758,22 @@ def _impact_for_event(
     )
 
 
+def _predecessor_has_residual(
+    event: DebtLineageEvent,
+    participant: DebtLineageParticipation,
+    versions_by_id: dict[str, tuple[DebtInstrumentVersion, ...]],
+) -> bool:
+    if event.event_type == "amendment":
+        return True
+    snapshot, _ = _boundary_snapshot(
+        versions_by_id[participant.stable_id], event.effective_date, predecessor=True
+    )
+    if participant.amount is None or snapshot.principal is None:
+        return False
+    tolerance = max(1e-9, abs(snapshot.principal) * 1e-9)
+    return participant.amount < snapshot.principal - tolerance
+
+
 def build_debt_lineage_graph(
     ledger: DebtInstrumentLedger,
     events: Iterable[DebtLineageEvent],
@@ -821,7 +860,12 @@ def build_debt_lineage_graph(
         predecessor_ids = {item.stable_id for item in event.predecessors}
         successor_ids = {item.stable_id for item in event.successors}
         incoming.update(successor_ids - predecessor_ids)
-        outgoing.update(predecessor_ids - successor_ids)
+        for participant in event.predecessors:
+            if participant.stable_id in successor_ids:
+                continue
+            if _predecessor_has_residual(event, participant, versions_by_id):
+                continue
+            outgoing.add(participant.stable_id)
     roots = sorted(lineage_instruments - incoming)
     terminals = sorted(lineage_instruments - outgoing)
 
@@ -903,7 +947,9 @@ def validate_debt_lineage_events_against_source_packet(
     if not errors:
         try:
             graph = build_debt_lineage_graph(ledger, events)
-            warnings.extend(graph.warnings)
+            warnings.extend(
+                warning for warning in graph.warnings if "candidate-only" not in warning
+            )
         except ValueError as exc:
             errors.append(str(exc))
 
@@ -937,6 +983,8 @@ def debt_lineage_graph_to_dict(graph: DebtLineageGraph) -> dict[str, Any]:
         "accounting_treatment_is_auto_inferred": False,
         "participant_amount_meaning": "principal participating in the event, not necessarily full instrument outstanding",
         "snapshot_principal_is_event_ceiling_only_on_same_date": True,
+        "mixed_currency_principal_is_auto_aggregated": False,
+        "partial_predecessor_can_remain_terminal": True,
     }
     return payload
 
@@ -977,7 +1025,9 @@ def debt_lineage_event_template(ledger: DebtInstrumentLedger) -> dict[str, Any]:
             "Do not mark status=verified in the event file; verification is a separate fingerprint-bound artifact.",
             "Do not merge old and new CUSIPs merely to force continuity; represent an exchange as an explicit event between distinct stable IDs.",
             "Use participant amount for the principal actually tendered/exchanged/redeemed when an event is partial.",
-            "For exchange/refinancing/conversion, leave unchanged residual debt outside the event instead of repeating the same stable ID on both sides.",
+            "A partially participating predecessor can remain outstanding and terminal after the event.",
+            "For exchange/refinancing/conversion, leave unchanged residual debt outside the successor list instead of repeating the same stable ID on both sides.",
+            "Do not aggregate raw principal across currencies; mixed-currency lineage requires an explicit FX conversion basis that this schema does not yet support.",
             "A snapshot observed on another date is context, not a hard ceiling on source-backed event principal; date mismatch remains unresolved.",
             "Do not classify modification versus extinguishment from labels alone; accounting treatment requires explicit source-backed basis.",
             "Candidate events are research leads only and must not be treated as confirmed lineage.",
