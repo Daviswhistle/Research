@@ -118,7 +118,10 @@ Repository는 event type만 보고 12.5 / 5를 자동 계산하지 않는다.
 ```text
 event_date >= analysis_date
 known_date >= event_date
+event_date <= analysis_date + 3y
 ```
+
+즉 +3년 이후에 발생한 사건을 +3년 metric의 조기 확정 근거로 소급할 수 없다.
 
 `equity_multiple_3y_known_date`는 payoff fact가 알려진 날짜보다 빠를 수 없다.
 
