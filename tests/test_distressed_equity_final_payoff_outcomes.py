@@ -91,7 +91,7 @@ def test_early_three_year_multiple_without_final_payoff_fact_is_rejected(tmp_pat
         final_shareholder_payoff_multiple="",
         final_shareholder_payoff_evidence_refs="",
     )])
-    with pytest.raises(ValueError, match="equity_multiple_3y cannot be known before the \+3y horizon"):
+    with pytest.raises(ValueError, match=r"equity_multiple_3y cannot be known before the \+3y horizon"):
         CsvSourceBackedOutcomeIndex(path)
 
 
