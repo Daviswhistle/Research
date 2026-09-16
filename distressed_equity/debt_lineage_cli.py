@@ -11,6 +11,8 @@ from .debt_lineage import (
     debt_lineage_event_template,
     debt_lineage_events_from_dict,
     debt_lineage_graph_to_dict,
+    debt_lineage_verification_template,
+    promote_verified_debt_lineage_events,
     validate_debt_lineage_events_against_source_packet,
 )
 from .instrument_verification import validate_debt_snapshots_against_source_packet
@@ -24,11 +26,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "events",
         nargs="?",
-        help="JSON with explicit lineage events; omit with --template-output to create a research template",
+        help="JSON with candidate lineage events; omit with --template-output to create a research template",
     )
     parser.add_argument("--source-packet", help="Frozen SEC debt_instrument_sources.json")
     parser.add_argument("--output", "-o", help="Combined ledger + lineage JSON; stdout when omitted")
     parser.add_argument("--template-output", help="Write an event template containing available stable IDs")
+    parser.add_argument(
+        "--verification-template-output",
+        help="Write fingerprint-bound verification template for the supplied candidate events",
+    )
+    parser.add_argument(
+        "--verification",
+        help="Verification JSON; only events with matching fingerprint and reopened evidence are promoted to verified",
+    )
     parser.add_argument("--match-threshold", type=float, default=55.0)
     parser.add_argument("--ambiguity-margin", type=float, default=8.0)
     return parser
@@ -105,6 +115,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         events = debt_lineage_events_from_dict(raw_events)
 
+    if args.verification_template_output:
+        _write(args.verification_template_output, debt_lineage_verification_template(events))
+
+    if args.verification:
+        verification = _load_object(args.verification)
+        events = promote_verified_debt_lineage_events(events, verification)
+
     lineage = build_debt_lineage_graph(ledger, events)
     payload = {
         "ledger": debt_instrument_ledger_to_dict(ledger),
@@ -114,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.output:
         _write(args.output, payload)
         print(args.output)
+    elif args.verification_template_output and not args.verification:
+        print(args.verification_template_output)
     else:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
