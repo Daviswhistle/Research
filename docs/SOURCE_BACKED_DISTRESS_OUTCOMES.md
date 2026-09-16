@@ -8,6 +8,7 @@
 - Chapter 11 / restructuring이 발생했는가
 - 분석 당시의 기존 보통주가 법적으로 살아남았는가
 - 영업이 정상화됐는가
+- 기존 보통주의 최종 경제적 payoff가 얼마였는가
 
 따라서 `distressed-equity-credit-replay`의 market-observable outcome과 **legal/business outcome**을 분리한다.
 
@@ -29,9 +30,12 @@ bond price < 40
 
 Chapter 11 filing
     != permanent company failure
+
+cash acquisition closed
+    != automatically inferred equity_multiple_3y
 ```
 
-시장 데이터와 일반 사건명은 탐색/evidence다. 법률적·사업적 outcome은 source-backed metric이어야 한다.
+시장 데이터와 일반 사건명은 탐색/evidence다. 법률적·사업적 outcome과 최종 주주 payoff는 source-backed metric/fact여야 한다.
 
 ## CSV schema
 
@@ -128,6 +132,8 @@ Cutoff까지 admitted된 metric의 evidence refs만 다시 합쳐 row-level `evi
 
 따라서 2024 최종 문서가 row-level evidence에 있어도 2022 cutoff-safe label의 provenance에는 남지 않는다.
 
+Terminal/payoff fact도 해당 fact가 cutoff 이전에 알려졌고, cutoff에서 실제로 admitted된 metric을 뒷받침할 때만 partial view에 남는다.
+
 ## 조기 terminal outcome provenance
 
 Nominal horizon 전에 `false`가 **돌이킬 수 없이 확정된 경우**를 지원하되, 사건명을 보고 자동 추론하지 않는다.
@@ -212,6 +218,64 @@ bankruptcy filing
 
 마찬가지로 company terminal fact가 있다고 해서 기존 common extinction을 자동으로 만들지 않는다. 기존 common의 종료는 별도 common terminal fact가 필요하다.
 
+## Final shareholder payoff provenance
+
+`equity_multiple_3y`는 원칙적으로 +3년 이후 확정한다. 다만 +3년 전에 T0 기존 보통주의 **전체 최종 payoff가 법적으로·경제적으로 고정**된 경우에는 조기 확정을 허용한다.
+
+Optional fields:
+
+```text
+final_shareholder_payoff_event_type
+final_shareholder_payoff_event_date
+final_shareholder_payoff_known_date
+final_shareholder_payoff_multiple
+final_shareholder_payoff_evidence_refs
+```
+
+허용 type:
+
+```text
+fixed_cash_acquisition_closed
+final_liquidation_distribution
+common_extinguished_no_distribution
+```
+
+이 계층은 사건명에서 payoff를 계산하지 않는다. 검토자가 **최종 payoff multiple 자체**를 source-backed 값으로 명시해야 한다.
+
+### 검증 규칙
+
+```text
+payoff event date >= analysis date
+payoff known date >= payoff event date
+payoff event date <= analysis date + 3y
+payoff multiple is finite and >= 0
+payoff multiple == equity_multiple_3y
+payoff known date <= equity_multiple_3y_known_date
+payoff evidence refs ⊆ equity_multiple_3y_evidence_refs
+```
+
+`common_extinguished_no_distribution`이면 payoff multiple은 반드시 `0`이어야 한다.
+
+Final payoff fact가 있으면서 `equity_multiple_3y`가 blank인 row도 거부한다.
+
+Final payoff fact가 없다면 +3년 이전 `equity_multiple_3y_known_date`는 계속 거부한다.
+
+### Terminal common-survival fact와의 분리
+
+Final payoff provenance와 common-survival terminal provenance는 서로 다른 증명 층이다.
+
+```text
+final payoff known
+    != automatically existing_common_survived_12m=false
+
+common cancelled
+    != automatically a particular equity_multiple_3y
+```
+
+필요하면 두 fact를 각각 별도로 입증한다. 한쪽에서 다른 쪽을 추론하지 않는다.
+
+자세한 설계는 `docs/FINAL_SHAREHOLDER_PAYOFFS.md`를 본다.
+
 ## Horizon 경계
 
 ### 12개월 outcome
@@ -245,11 +309,11 @@ false
 
 ### equity_multiple_3y
 
-현재는 여전히 +3년 horizon 이전 확정을 허용하지 않는다.
+원칙적으로 +3년 horizon 이후 확정한다.
 
-Cash acquisition, liquidation distribution 등으로 주주 payoff가 일찍 고정될 수 있지만, 이를 올바르게 다루려면 **최종 shareholder payoff multiple을 별도로 검증하는 모델**이 필요하다.
+예외적으로 +3년 이내 발생한 verified final shareholder payoff fact가 전체 payoff를 고정했고 그 fact가 metric known date까지 알려졌다면 조기 확정할 수 있다.
 
-Terminal event type만 보고 3년 multiple을 자동 결정하지 않는다.
+사건명만으로 배수를 추정하지 않는다.
 
 ## Verification boundary
 
@@ -263,7 +327,7 @@ evidence_reopened = true
 evidence_refs != blank
 ```
 
-Metric-specific provenance와 terminal provenance도 각각 자기 evidence refs를 가져야 한다.
+Metric-specific provenance, terminal provenance, final-payoff provenance도 각각 자기 evidence refs와 knowledge date를 가져야 한다.
 
 Repository가 source text를 이 CSV만으로 다시 검증한다고 주장하지는 않는다. 이 계층은 **검토 provenance가 없는 임의 outcome row가 자동 base rate에 들어가는 것을 막는 구조적 경계**다.
 
@@ -279,7 +343,9 @@ metric_known_date <= knowledge cutoff
 
 한 row 전체를 all-or-nothing으로 숨기지 않는다.
 
-Terminal fact도 해당 fact의 known date가 cutoff 이전이고, cutoff에서 admitted된 metric을 실제로 뒷받침할 때만 cutoff-safe label에 남는다.
+Terminal fact로 조기 확정된 `false`는 terminal fact와 metric이 당시 이미 알려졌을 때만 들어간다.
+
+Final-payoff fact로 조기 확정된 3년 배수도 payoff fact와 metric이 target T0까지 이미 알려졌을 때만 들어간다. 사후에 알게 된 acquisition/liquidation payoff는 과거 prior에 역류하지 않는다.
 
 ## Group comparison
 
@@ -342,9 +408,11 @@ metric_known_date <= target T0
 
 인 metric만 calibration에 들어간다.
 
-Terminal fact로 조기 확정된 `false`도 그 terminal fact와 metric이 당시 이미 알려졌을 때만 prior에 들어간다.
+Terminal fact로 조기 확정된 `false`와 final-payoff fact로 조기 확정된 3년 배수도 각각 그 provenance가 target T0까지 이미 알려졌을 때만 calibration population에 들어간다.
 
-자세한 내용은 `docs/WALK_FORWARD_PRIORS.md`를 본다.
+따라서 2020 T0 기업이 2021년에 fixed-cash acquisition으로 최종 4.0x payoff가 확정됐다면, 2022 target prior에서는 사용할 수 있지만 2021 payoff 확정 전 target prior에는 사용할 수 없다.
+
+자세한 내용은 `docs/WALK_FORWARD_PRIORS.md`와 `docs/FINAL_SHAREHOLDER_PAYOFFS.md`를 본다.
 
 ## 실제 probability calibration으로 가는 길
 
@@ -354,7 +422,7 @@ Terminal fact로 조기 확정된 `false`도 그 terminal fact와 metric이 당�
 P(company survives 12m | equity distress, credit distress)
 P(existing common survives 12m | equity distress, credit distress)
 P(normalizes within 3y | equity distress, credit distress, impairment type)
-P(3x within 3y | verified common-survival cohort)
+P(3x within 3y | T0 strata)
 ```
 
 중요한 것은 probability를 LLM이 정하는 게 아니라 **point-in-time input + 당시 알려져 있던 verified outcome population에서 계산한다는 점**이다.
