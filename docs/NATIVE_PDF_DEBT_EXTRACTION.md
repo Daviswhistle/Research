@@ -2,63 +2,44 @@
 
 ## 목적
 
-SEC debt exhibit가 PDF라는 이유만으로 binary bytes를 `response.text`로 decode하지 않는다. Native text layer가 충분한 PDF는 deterministic layout evidence로 처리하고, 그렇지 않은 scanned/image source는 **multimodal source reader**로 넘긴다.
+SEC debt exhibit가 PDF라는 이유만으로 binary bytes를 `response.text`로 decode하지 않는다. Native text layer와 좌표 구조가 usable하면 deterministic extraction을 하고, 그렇지 않으면 multimodal source reader로 넘긴다.
 
 ```text
 PDF bytes
-  -> native text layer usable?
-       yes -> pypdf text matrix / deterministic extraction
+  -> pypdf native text fragments(page/x/y/font/text)
+  -> explicit layout structure exists?
+       yes -> deterministic table/prose extraction
        no  -> multimodal source reader
 ```
 
-Scanned PDF를 먼저 전면 OCR하고 모든 표를 JSON으로 만드는 단계는 기본 pipeline이 아니다.
+Repository의 기본 전략은 scanned PDF를 먼저 전면 OCR해 모든 표를 JSON화하는 것이 아니다.
 
-## Native-text path
+## Native-text safety gate
 
-현재 parser는 `pypdf>=6,<7`을 사용한다.
+기본 native-text density gate는 visual/image-only PDF를 text parser가 억지로 해석하는 것을 막는다.
 
-기본 안전 한계:
-
-```text
-max PDF bytes       = 25 MB
-min native chars    = 80 non-whitespace chars
-min text fragments  = 2 positioned fragments
-```
-
-이 기준은 usable native text layer가 있는지 확인하는 gate일 뿐 debt field confidence score가 아니다.
-
-각 text fragment는 다음을 보존한다.
+다만 **작지만 명백한 coordinate table**은 전체 문서 text density가 낮아도 안전하게 구조를 읽을 수 있다. 이 경우에만 제한적으로 예외를 둔다.
 
 ```text
-page_number
-x
-y
-font_size
-text
+sparse native text
+  + deterministic coordinate-table parser가 실제 candidate 생성
+  => table candidate 허용
+  => prose extraction은 여전히 금지
+
+sparse native text
+  + explicit table candidate 없음
+  => VISUAL_EXTRACTION_REQUIRED
 ```
 
-같은 page에서 y가 가까운 fragment를 visual row로, row 내부는 x 오름차순으로 재구성한다.
+즉 global threshold를 낮춘 것이 아니다.
 
-## Native PDF table extraction
+## 1. Ordinary row-oriented PDF table
 
-한 row에서 semantic header가 충분히 확인되면 header x 좌표 사이 midpoint를 column boundary로 사용한다.
-
-지원 header semantics:
-
-- instrument / security / debt / facility / loan
-- principal / outstanding / commitment / drawn / available
-- maturity
-- coupon / rate / benchmark / spread
-- CUSIP / ISIN
-- seniority / secured / currency
-
-Source ref:
+Semantic header의 x 좌표 midpoint를 column boundary로 사용한다.
 
 ```text
-<accession>:<sequence>:p<page>:r<row>
+Instrument | Principal | Maturity | Coupon | CUSIP
 ```
-
-Candidate provenance:
 
 ```text
 cluster_status = pdf_layout_row
@@ -69,20 +50,84 @@ cluster_basis = [
 ]
 ```
 
-Table로 판단된 page는 flattened prose로 다시 읽지 않는다.
+## 2. Multi-row PDF instrument
+
+한 instrument의 material fields가 바로 다음 y-row로 wrap될 수 있다.
+
+```text
+Term Loan B | 800 |        | CUSIP
+            |     | 2028-12-15 |
+```
+
+첫 행의 explicit identity를 유지한 채 인접 continuation row의 non-name fields만 결합한다.
+
+```text
+cluster_status = pdf_layout_row_group
+cluster_basis = [
+  contiguous_native_pdf_layout_rows,
+  shared_instrument_identity,
+  coordinate_mapped_columns,
+  pypdf_text_matrix
+]
+```
+
+같은 field가 서로 다른 값으로 충돌하면 선택/합산하지 않고 `null` + warning으로 남긴다.
+
+## 3. Transposed PDF table
+
+```text
+Term       | Note A | Note B
+Principal  | 500    | 400
+Maturity   | 2028   | 2030
+Coupon     | 5.25%  | 6.00%
+```
+
+첫 x-column에 field labels가 있고 상단 y-row에 instrument titles가 있으면 x-column별 candidate를 만든다.
+
+```text
+cluster_status = pdf_layout_column
+cluster_basis = [
+  transposed_native_pdf_table,
+  coordinate_mapped_instrument_columns,
+  first_column_field_labels,
+  pypdf_text_matrix
+]
+```
+
+`Senior Secured Notes`처럼 title 내부의 `secured` token이 generic field classifier에 걸리더라도, 전체 문자열이 강한 instrument identity이면 title interpretation을 우선한다.
+
+## PDF footnotes
+
+Native layout row에 `(1)`, `[a]`, `*` 등의 trailing marker가 있으면 numeric parsing 전에 marker를 분리한다.
+
+Page 안에서 유일한 definition을 찾으면 별도 evidence span으로 연결한다.
+
+```text
+PDF PAGE FOOTNOTE | page=... | marker=1 | ...
+```
+
+Footnote는 자동 adjustment rule이 아니다. Candidate는 linked footnote warning을 갖고 reviewer가 authoritative snapshot 승격 전에 원문을 재확인한다.
+
+## Aggregate row 방지
+
+`Total debt`, `Subtotal`, `Aggregate`는 instrument identity로 사용하지 않는다. Footnote-only row도 data candidate가 아니다.
 
 ## Native PDF prose
 
-Table header가 검출되지 않은 native-text page는 y/x coordinate order로 text를 재구성한 뒤 기존 debt block/clustering logic을 적용한다.
+명확한 table structure가 없는 충분한 native-text page는 y/x coordinate order로 재구성한 뒤 기존 debt-block clustering을 사용한다.
 
 ```text
 <accession>:<sequence>:p<page>:s<span>
 cluster_status = pdf_native_prose | pdf_native_prose_linked
 ```
 
+Table로 확정된 page는 다시 flattened prose로 중복 해석하지 않는다.
+
+Sparse-native-text 예외로 table을 읽은 경우에도 prose extraction은 하지 않는다.
+
 ## Graph / closure integration
 
-PDF semantics는 initial SEC packet에만 적용되지 않는다. Package bootstrap이 downstream graph module import 전에 document-aware helper를 설치하므로 다음 경로가 동일하다.
+동일한 PDF extraction semantics가 다음 경로에 적용된다.
 
 ```text
 initial SEC packet
@@ -92,64 +137,39 @@ foreign contract closure
 named-entity contract resolution
 ```
 
-Native PDF graph source는 coordinate-ordered string-compatible payload를 제공하면서 원본 bytes도 보존한다. Debt extraction은 그 bytes를 다시 사용해 layout candidate를 만든다.
+String-compatible native payload는 reference search를 가능하게 하면서 원본 PDF bytes도 보존한다. Debt extraction은 원본 bytes에서 다시 좌표 candidate를 만든다.
 
 ## Scanned / image-only PDF
 
-Native text layer가 없거나 너무 sparse하면 자동 debt candidate를 만들지 않는다.
+Native text/좌표가 없거나 deterministic association을 안전하게 만들 수 없으면 candidate를 만들지 않는다.
 
 ```text
 VISUAL_EXTRACTION_REQUIRED|...|media_type=pdf|...
 PDF_NATIVE_TEXT_UNAVAILABLE|...
-```
-
-Parser failure:
-
-```text
 PDF_NATIVE_TEXT_EXTRACTION_FAILED|...
 ```
 
-Native success:
-
-```text
-PDF_NATIVE_TEXT_EXTRACTED|...
-```
-
-여기서 `VISUAL_EXTRACTION_REQUIRED`의 다음 단계는 **OCR table extractor가 아니라 multimodal source reader**다.
-
-Multimodal model은 원본 page/image를 직접 읽고 다음 순서로 작업한다.
-
-```text
-source understanding
--> material finding
--> exact page / visual-region evidence
--> interpretation / investment implication
--> deterministic calculation에 필요한 최소 field만 structure-on-demand
-```
-
-즉 OCR은 model이 문자를 읽는 내부 수단일 수 있지만 repository가 요구하는 연구 산출물은 OCR transcript가 아니다.
-
-자세한 계약은 [`MULTIMODAL_SOURCE_READER.md`](MULTIMODAL_SOURCE_READER.md)를 참고한다.
+다음 단계는 OCR table pipeline이 아니라 multimodal source reader다.
 
 ## Verification boundary
 
-Native PDF candidate도 authoritative debt row가 아니다. 최소 다음을 확인해야 한다.
+Native PDF candidate도 authoritative debt row가 아니다. 최소 다음을 다시 확인해야 한다.
 
-1. text-matrix 좌표가 실제 visual layout과 일치하는지
-2. header anchor가 실제 column header인지
-3. wrapped cell이 다른 row로 잘못 분리되지 않았는지
-4. amount unit이 header/footnote와 일치하는지
-5. source ref page/row가 실제 instrument를 지지하는지
+1. x/y reconstruction이 실제 visual layout과 일치하는가
+2. header/field-label orientation이 맞는가
+3. continuation row가 같은 instrument인가
+4. unit와 footnote가 amount 의미를 바꾸는가
+5. CUSIP/ISIN이 올바른 instrument column/row에 붙었는가
+6. source refs가 실제 candidate를 지지하는가
 
-Multimodal source-reader finding도 마찬가지로 source evidence를 다시 열 수 있어야 하며 model confidence만으로 deterministic engine patch를 확정하지 않는다.
+## 여전히 deterministic하지 않는 경우
 
-## Known limitations
+- rotated/skewed text 또는 복잡한 CTM 때문에 좌표가 깨진 PDF
+- glyph 단위로 지나치게 잘게 쪼개져 column identity를 안정적으로 복구할 수 없는 PDF
+- 시각적 병합관계가 text matrix에 보존되지 않은 표
+- 여러 page의 visual hierarchy를 함께 봐야 하는 구조
+- chart/image callout을 통해서만 debt term을 이해할 수 있는 source
 
-- rotated/skewed text 또는 복잡한 CTM 사용 PDF
-- multi-row/spanning PDF headers
-- transposed debt tables
-- footnote가 amount/unit 의미를 바꾸는 표
-- glyph 단위로 지나치게 잘게 쪼개진 native text
-- multimodal runner/provider adapter는 별도 integration 단계
+이 경우는 multimodal 원본 읽기로 남긴다.
 
-핵심은 **native structure가 있으면 deterministic하게 활용하고, 없으면 원본을 multimodal model이 직접 이해하게 하며, 불필요한 전면 구조화는 하지 않는 것**이다.
+핵심은 **좌표 구조가 증거로 충분한 곳까지만 deterministic하게 사용하고, 그 이상은 원본 시각문맥을 다시 읽는 것**이다.
