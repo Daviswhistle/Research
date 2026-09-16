@@ -114,12 +114,26 @@ def test_prior_calibration_cli_replays_grid_and_scores_ex_ante_priors(tmp_path: 
         ("C", 0.5, True),
     ]
 
+    stability = payload["stability"]
+    assert stability["forecast_observation_count"] == payload["forecast_observation_count"]
+    assert stability["slice_count"] > 0
+    stability_keys = {
+        (item["dimension"], item["basis"], item["metric"], item["value"])
+        for item in stability["slices"]
+    }
+    assert ("target_year", "credit_group", "survived_12m", "2020") in stability_keys
+    assert ("target_year", "credit_group", "survived_12m", "2022") in stability_keys
+    assert ("credit_group", "credit_group", "survived_12m", "fresh_credit_stress") in stability_keys
+    assert ("basis_bucket", "liquidity_runway", "survived_12m", "12-<24m") in stability_keys
+
     summary = markdown.read_text(encoding="utf-8")
     assert "Walk-forward prior calibration" in summary
     assert "Brier score" in summary
     assert "0.6250" in summary
     assert "credit_group" in summary
     assert "liquidity_runway" in summary
+    assert "Stability slices" in summary
+    assert "calibration_n_band" in summary
     assert "separate forecast family" in summary
 
 
