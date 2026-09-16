@@ -14,6 +14,12 @@ from .credit_replay import (
 )
 from .csv_bond_market import CsvBondMarketProvider
 from .csv_market import CsvMarketProvider
+from .market_outcomes import (
+    MarketOutcomeCohort,
+    MarketOutcomeConfig,
+    label_market_outcome_cohort,
+    market_outcome_cohort_to_dict,
+)
 from .replay import DistressScanConfig, run_historical_replay
 
 
@@ -36,12 +42,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--credit-price-below", type=float, default=80.0)
     parser.add_argument("--credit-yield-at-or-above", type=float, default=15.0)
     parser.add_argument("--credit-spread-at-or-above", type=float, default=1000.0)
+    parser.add_argument(
+        "--outcome-cutoff",
+        help=(
+            "Optional YYYY-MM-DD date through which later market data may be used to label market-observable "
+            "+12m/+3y outcomes. Omit to keep candidate replay strictly cutoff-only."
+        ),
+    )
+    parser.add_argument(
+        "--outcome-horizon-grace-days",
+        type=int,
+        default=31,
+        help="Maximum days after a +12m/+3y target to find the first adjusted price observation",
+    )
     parser.add_argument("--output", "-o", help="JSON output; stdout when omitted")
     parser.add_argument("--markdown-output", help="Optional human-readable cohort summary")
     return parser
 
 
-def _markdown(run: JointReplayRun) -> str:
+def _markdown(run: JointReplayRun, outcomes: MarketOutcomeCohort | None = None) -> str:
     lines = [
         f"# Joint equity / credit distress replay — {run.analysis_date.isoformat()}",
         "",
@@ -70,6 +89,38 @@ def _markdown(run: JointReplayRun) -> str:
         "> Credit stress is a cross-check, not a default-probability estimate. Missing links, stale trades, price, yield, and spread signals remain separate fields.",
         "",
     ])
+
+    if outcomes is not None:
+        lines.extend([
+            "## Market-observable outcomes",
+            "",
+            f"- outcome data cutoff: **{outcomes.outcome_cutoff.isoformat()}**",
+            f"- +12m membership resolved: **{outcomes.resolved_12m_membership_count:,}/{outcomes.case_count:,}**",
+            f"- same permanent security active at +12m: **{outcomes.active_12m_count:,}**",
+            f"- +3y membership resolved: **{outcomes.resolved_3y_membership_count:,}/{outcomes.case_count:,}**",
+            f"- same permanent security active at +3y: **{outcomes.active_3y_count:,}**",
+            f"- +3y endpoint multiple resolved: **{outcomes.resolved_3y_endpoint_multiple_count:,}**",
+            f"- 3y max observed multiple resolved: **{outcomes.resolved_3y_max_multiple_count:,}**",
+            "",
+            "| Symbol | Active +12m | Adj. multiple +12m | Active +3y | Adj. multiple +3y | Max observed multiple ≤3y |",
+            "|---|---|---:|---|---:|---:|",
+        ])
+        for outcome in outcomes.outcomes:
+            m12 = "—" if outcome.adjusted_price_multiple_12m is None else f"{outcome.adjusted_price_multiple_12m:.2f}x"
+            m3 = "—" if outcome.adjusted_price_multiple_3y is None else f"{outcome.adjusted_price_multiple_3y:.2f}x"
+            max3 = (
+                "—"
+                if outcome.max_adjusted_price_multiple_within_3y is None
+                else f"{outcome.max_adjusted_price_multiple_within_3y:.2f}x"
+            )
+            a12 = "unknown" if outcome.same_security_active_12m is None else ("yes" if outcome.same_security_active_12m else "no")
+            a3 = "unknown" if outcome.same_security_active_3y is None else ("yes" if outcome.same_security_active_3y else "no")
+            lines.append(f"| {outcome.symbol_at_distress} | {a12} | {m12} | {a3} | {m3} | {max3} |")
+        lines.extend([
+            "",
+            "> Same-security membership and adjusted-price multiples are market-observable facts only. They are not labels for corporate survival, bankruptcy avoidance, reorganization success, or legal survival of the pre-distress common stock.",
+            "",
+        ])
     return "\n".join(lines)
 
 
@@ -102,7 +153,20 @@ def main(argv: list[str] | None = None) -> int:
             spread_stress_at_or_above_bps=args.credit_spread_at_or_above,
         ),
     )
-    text = json.dumps(joint_replay_to_dict(joint), ensure_ascii=False, indent=2) + "\n"
+
+    outcomes = None
+    payload = joint_replay_to_dict(joint)
+    if args.outcome_cutoff:
+        outcome_cutoff = date.fromisoformat(args.outcome_cutoff)
+        outcomes = label_market_outcome_cohort(
+            equity_provider,
+            (item.equity for item in joint.candidates),
+            outcome_cutoff,
+            config=MarketOutcomeConfig(horizon_grace_days=args.outcome_horizon_grace_days),
+        )
+        payload["market_outcomes"] = market_outcome_cohort_to_dict(outcomes)
+
+    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
         target = Path(args.output)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -112,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.markdown_output:
         target = Path(args.markdown_output)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(_markdown(joint), encoding="utf-8")
+        target.write_text(_markdown(joint, outcomes), encoding="utf-8")
     return 0
 
 
