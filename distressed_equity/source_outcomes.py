@@ -11,6 +11,27 @@ from typing import Iterable
 from .credit_replay import JointDistressSeed, JointReplayRun
 
 
+_COMPANY_TERMINAL_EVENT_TYPES = frozenset({
+    "liquidation",
+    "dissolution",
+    "permanent_cessation",
+})
+_COMMON_TERMINAL_EVENT_TYPES = frozenset({
+    "cancellation",
+    "extinguishment",
+    "cash_acquisition_closed",
+    "final_liquidation_distribution",
+})
+
+
+@dataclass(frozen=True)
+class TerminalOutcomeFact:
+    event_type: str
+    event_date: date
+    known_date: date
+    evidence_refs: tuple[str, ...]
+
+
 @dataclass(frozen=True)
 class SourceBackedOutcomeLabel:
     security_id: str
@@ -29,6 +50,8 @@ class SourceBackedOutcomeLabel:
     equity_multiple_3y: float | None
     equity_multiple_3y_known_date: date | None
     equity_multiple_3y_evidence_refs: tuple[str, ...]
+    company_terminal_fact: TerminalOutcomeFact | None
+    common_terminal_fact: TerminalOutcomeFact | None
     industry_group: str | None
     impairment_type: str | None
     leverage_bucket: str | None
@@ -48,12 +71,14 @@ class SourceBackedOutcomeLabel:
         Row-level evidence can include later documents supporting later metrics.
         The cutoff-safe view therefore rebuilds `evidence_refs` exclusively from
         the metric-specific refs admitted by the cutoff instead of retaining the
-        original row-wide evidence set.
+        original row-wide evidence set. Terminal facts are retained only when
+        they were known by the cutoff and support an admitted outcome metric.
         """
 
         updates: dict[str, object] = {}
         known_dates: list[date] = []
         admitted_refs: list[str] = []
+        admitted_values: dict[str, object | None] = {}
         metrics = (
             ("survived_12m", "survived_12m_known_date", "survived_12m_evidence_refs"),
             (
@@ -76,14 +101,32 @@ class SourceBackedOutcomeLabel:
                 updates[value_field] = value
                 updates[date_field] = known_date
                 updates[refs_field] = refs
+                admitted_values[value_field] = value
                 known_dates.append(known_date)
                 admitted_refs.extend(refs)
             else:
                 updates[value_field] = None
                 updates[date_field] = None
                 updates[refs_field] = ()
+                admitted_values[value_field] = None
         if not known_dates:
             return None
+
+        company_terminal_admitted = (
+            self.company_terminal_fact is not None
+            and self.company_terminal_fact.known_date <= cutoff
+            and (
+                admitted_values["survived_12m"] is False
+                or admitted_values["normalized_within_3y"] is False
+            )
+        )
+        common_terminal_admitted = (
+            self.common_terminal_fact is not None
+            and self.common_terminal_fact.known_date <= cutoff
+            and admitted_values["existing_common_survived_12m"] is False
+        )
+        updates["company_terminal_fact"] = self.company_terminal_fact if company_terminal_admitted else None
+        updates["common_terminal_fact"] = self.common_terminal_fact if common_terminal_admitted else None
         updates["outcome_known_date"] = max(known_dates)
         updates["evidence_refs"] = tuple(dict.fromkeys(admitted_refs))
         # Free-form row notes may summarize later evidence/outcomes and therefore
@@ -206,6 +249,85 @@ def _metric_provenance(
     return fallback_date, (explicit_refs or fallback_refs)
 
 
+def _terminal_fact(
+    raw: dict[str, str | None],
+    *,
+    prefix: str,
+    allowed_types: frozenset[str],
+    analysis_date: date,
+    row: int,
+) -> TerminalOutcomeFact | None:
+    type_field = f"{prefix}_terminal_event_type"
+    date_field = f"{prefix}_terminal_event_date"
+    known_field = f"{prefix}_terminal_event_known_date"
+    refs_field = f"{prefix}_terminal_event_evidence_refs"
+    event_type = str(raw.get(type_field) or "").strip().lower()
+    raw_date = str(raw.get(date_field) or "").strip()
+    raw_known = str(raw.get(known_field) or "").strip()
+    refs = _refs(raw.get(refs_field))
+    if not any((event_type, raw_date, raw_known, refs)):
+        return None
+    if not event_type or not raw_date or not raw_known or not refs:
+        raise ValueError(
+            f"source outcomes CSV row {row}: {prefix} terminal fact requires event_type, event_date, event_known_date, and evidence_refs"
+        )
+    if event_type not in allowed_types:
+        raise ValueError(
+            f"source outcomes CSV row {row}: {type_field} must be one of {sorted(allowed_types)}"
+        )
+    event_date = _parse_date(raw_date, field=date_field, row=row)
+    known_date = _parse_date(raw_known, field=known_field, row=row)
+    if event_date < analysis_date:
+        raise ValueError(
+            f"source outcomes CSV row {row}: {date_field} cannot precede analysis_date"
+        )
+    if known_date < event_date:
+        raise ValueError(
+            f"source outcomes CSV row {row}: {known_field} cannot precede terminal event date"
+        )
+    return TerminalOutcomeFact(
+        event_type=event_type,
+        event_date=event_date,
+        known_date=known_date,
+        evidence_refs=refs,
+    )
+
+
+def _validate_early_false(
+    *,
+    metric: str,
+    value: bool | None,
+    known_date: date | None,
+    metric_refs: tuple[str, ...],
+    horizon: date,
+    terminal_fact: TerminalOutcomeFact | None,
+    row: int,
+) -> None:
+    if known_date is None or known_date >= horizon:
+        return
+    if value is not False:
+        raise ValueError(
+            f"source outcomes CSV row {row}: {metric} cannot be known before its nominal horizon unless an explicit terminal fact irreversibly establishes false"
+        )
+    if terminal_fact is None:
+        raise ValueError(
+            f"source outcomes CSV row {row}: early {metric}=false requires an explicit verified terminal fact"
+        )
+    if terminal_fact.event_date > horizon:
+        raise ValueError(
+            f"source outcomes CSV row {row}: terminal event for {metric} occurs after the metric horizon"
+        )
+    if terminal_fact.known_date > known_date:
+        raise ValueError(
+            f"source outcomes CSV row {row}: {metric} known date precedes supporting terminal-event knowledge"
+        )
+    missing_refs = sorted(set(terminal_fact.evidence_refs) - set(metric_refs))
+    if missing_refs:
+        raise ValueError(
+            f"source outcomes CSV row {row}: {metric} evidence_refs must include terminal-event evidence refs: {', '.join(missing_refs)}"
+        )
+
+
 class CsvSourceBackedOutcomeIndex:
     """Verified legal/business outcome labels with field-level knowledge provenance."""
 
@@ -316,6 +438,29 @@ class CsvSourceBackedOutcomeIndex:
                     row=row_number,
                 )
 
+                company_terminal = _terminal_fact(
+                    raw,
+                    prefix="company",
+                    allowed_types=_COMPANY_TERMINAL_EVENT_TYPES,
+                    analysis_date=analysis_date,
+                    row=row_number,
+                )
+                common_terminal = _terminal_fact(
+                    raw,
+                    prefix="common",
+                    allowed_types=_COMMON_TERMINAL_EVENT_TYPES,
+                    analysis_date=analysis_date,
+                    row=row_number,
+                )
+                if company_terminal is not None and not (survived is False or normalized is False):
+                    raise ValueError(
+                        f"source outcomes CSV row {row_number}: company terminal fact requires survived_12m=false or normalized_within_3y=false"
+                    )
+                if common_terminal is not None and common_survived is not False:
+                    raise ValueError(
+                        f"source outcomes CSV row {row_number}: common terminal fact requires existing_common_survived_12m=false"
+                    )
+
                 metric_dates = tuple(
                     item
                     for item in (survived_known, common_known, normalized_known, multiple_known)
@@ -329,21 +474,38 @@ class CsvSourceBackedOutcomeIndex:
                     raise ValueError(
                         f"source outcomes CSV row {row_number}: outcome_known_date must be on or after all metric known dates"
                     )
-                if survived_known is not None and survived_known < _add_years(analysis_date, 1):
-                    raise ValueError(
-                        f"source outcomes CSV row {row_number}: survived_12m cannot be known before the +12m horizon"
-                    )
-                if common_known is not None and common_known < _add_years(analysis_date, 1):
-                    raise ValueError(
-                        f"source outcomes CSV row {row_number}: existing_common_survived_12m cannot be known before the +12m horizon"
-                    )
-                if normalized is False and normalized_known is not None and normalized_known < _add_years(analysis_date, 3):
-                    raise ValueError(
-                        f"source outcomes CSV row {row_number}: normalized_within_3y=false cannot be known before the +3y horizon"
+
+                _validate_early_false(
+                    metric="survived_12m",
+                    value=survived,
+                    known_date=survived_known,
+                    metric_refs=survived_refs,
+                    horizon=_add_years(analysis_date, 1),
+                    terminal_fact=company_terminal,
+                    row=row_number,
+                )
+                _validate_early_false(
+                    metric="existing_common_survived_12m",
+                    value=common_survived,
+                    known_date=common_known,
+                    metric_refs=common_refs,
+                    horizon=_add_years(analysis_date, 1),
+                    terminal_fact=common_terminal,
+                    row=row_number,
+                )
+                if normalized is False:
+                    _validate_early_false(
+                        metric="normalized_within_3y",
+                        value=normalized,
+                        known_date=normalized_known,
+                        metric_refs=normalized_refs,
+                        horizon=_add_years(analysis_date, 3),
+                        terminal_fact=company_terminal,
+                        row=row_number,
                     )
                 if multiple_known is not None and multiple_known < _add_years(analysis_date, 3):
                     raise ValueError(
-                        f"source outcomes CSV row {row_number}: equity_multiple_3y cannot be known before the +3y horizon"
+                        f"source outcomes CSV row {row_number}: equity_multiple_3y cannot be known before the +3y horizon without an explicit final shareholder-payoff model"
                     )
                 if verified_on < outcome_known:
                     raise ValueError(
@@ -367,6 +529,8 @@ class CsvSourceBackedOutcomeIndex:
                     equity_multiple_3y=multiple,
                     equity_multiple_3y_known_date=multiple_known,
                     equity_multiple_3y_evidence_refs=multiple_refs,
+                    company_terminal_fact=company_terminal,
+                    common_terminal_fact=common_terminal,
                     industry_group=_optional(raw.get("industry_group")),
                     impairment_type=_optional(raw.get("impairment_type")),
                     leverage_bucket=_optional(raw.get("leverage_bucket")),
@@ -481,6 +645,8 @@ def compare_source_outcome_base_rates(
             "cutoff-safe labels rebuild row-level evidence_refs from only the admitted metric evidence; later row-wide evidence and free-form notes are withheld",
             "legacy rows without metric-specific provenance fall back to outcome_known_date plus the row-level evidence refs",
             "metric-specific known dates require metric-specific evidence refs so later evidence cannot be used to backdate knowledge",
+            "early false survival/common/normalization outcomes are admitted only with explicit metric-matched terminal-event provenance; no event-type inference is performed from generic labels",
+            "three-year equity multiples remain horizon-bound until an explicit final shareholder-payoff model is implemented",
             "group denominators expose both cohort_case_count and source_labeled_case_count so missing legal/business outcome coverage is not treated as failure",
             "no_fresh_credit is a coverage/liquidity category and must not be interpreted as healthy credit",
         ),
