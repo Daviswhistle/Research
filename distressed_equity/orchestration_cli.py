@@ -13,6 +13,7 @@ from .debt_lineage import (
     build_debt_lineage_graph,
     debt_lineage_event_template,
     debt_lineage_graph_to_dict,
+    debt_lineage_source_packet_fingerprint,
     debt_lineage_verification_template,
     promote_verified_debt_lineage_events,
     validate_debt_lineage_events_against_source_packet,
@@ -76,6 +77,10 @@ def _load_json_any(path: str | Path) -> dict[str, Any] | list[dict[str, Any]]:
     if not isinstance(payload, (dict, list)):
         raise ValueError(f"expected JSON object or list: {path}")
     return payload
+
+
+def _same_path(left: str | Path, right: str | Path) -> bool:
+    return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
 
 
 def _bundle_from_frozen_packet(packet: dict[str, Any], cutoff: date, *, requested_ticker: str | None = None, requested_cik: str | None = None) -> ResearchBundle:
@@ -143,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.debt_lineage_verification and not args.debt_lineage:
         raise ValueError("--debt-lineage-verification requires --debt-lineage")
+    lineage_verification_input = _load_json(args.debt_lineage_verification) if args.debt_lineage_verification else None
 
     if packet_path.exists() and not args.refresh:
         bundle = _bundle_from_frozen_packet(_load_json(packet_path), cutoff, requested_ticker=args.ticker, requested_cik=args.cik)
@@ -210,10 +216,20 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("invalid source-backed debt lineage events: " + "; ".join(lineage_validation.errors))
         debt_lineage_validation_warnings = lineage_validation.warnings
         events = lineage_validation.events
-        verification_template = debt_lineage_verification_template(events)
-        _write_json(workspace / "debt_lineage_verification_template.json", verification_template)
-        if args.debt_lineage_verification:
-            events = promote_verified_debt_lineage_events(events, _load_json(args.debt_lineage_verification))
+        source_fingerprint = debt_lineage_source_packet_fingerprint(source_packet)
+        verification_template = debt_lineage_verification_template(
+            events,
+            source_packet_fingerprint=source_fingerprint,
+        )
+        verification_path = workspace / "debt_lineage_verification_template.json"
+        if lineage_verification_input is None or not _same_path(verification_path, args.debt_lineage_verification):
+            _write_json(verification_path, verification_template)
+        if lineage_verification_input is not None:
+            events = promote_verified_debt_lineage_events(
+                events,
+                lineage_verification_input,
+                source_packet_fingerprint=source_fingerprint,
+            )
         lineage = build_debt_lineage_graph(debt_ledger, events)
         debt_lineage_payload = debt_lineage_graph_to_dict(lineage)
         _write_json(workspace / "debt_lineage.json", debt_lineage_payload)
