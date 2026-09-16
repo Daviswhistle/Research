@@ -6,7 +6,7 @@ from pathlib import Path
 from distressed_equity.population_coverage_cli import main
 
 
-def test_population_coverage_cli_exposes_missing_credit_outcome_and_feature_coverage(tmp_path: Path):
+def test_population_coverage_cli_exposes_missing_credit_outcome_feature_and_evaluability_coverage(tmp_path: Path):
     securities = tmp_path / "securities.csv"
     prices = tmp_path / "prices.csv"
     links = tmp_path / "links.csv"
@@ -19,7 +19,9 @@ def test_population_coverage_cli_exposes_missing_credit_outcome_and_feature_cove
     securities.write_text(
         "security_id,symbol,name,exchange,asset_type,start_date,end_date\n"
         "A,A,Case A,NYSE,stock,2010-01-01,2019-12-31\n"
-        "B,B,Case B,NYSE,stock,2020-01-01,\n",
+        "B,B,Case B,NYSE,stock,2020-01-01,\n"
+        "C,C,Evaluable Noncandidate,NYSE,stock,2020-01-01,\n"
+        "D,D,Unevaluable Missing Prices,NYSE,stock,2020-01-01,\n",
         encoding="utf-8",
     )
     prices.write_text(
@@ -27,7 +29,9 @@ def test_population_coverage_cli_exposes_missing_credit_outcome_and_feature_cove
         "A,A,2017-12-31,25,25\n"
         "A,A,2018-12-31,5,5\n"
         "B,B,2020-01-02,25,25\n"
-        "B,B,2020-12-31,5,5\n",
+        "B,B,2020-12-31,5,5\n"
+        "C,C,2020-01-02,25,25\n"
+        "C,C,2020-12-31,20,20\n",
         encoding="utf-8",
     )
     links.write_text(
@@ -78,6 +82,12 @@ def test_population_coverage_cli_exposes_missing_credit_outcome_and_feature_cove
     rows = {row["analysis_date"]: row for row in payload["rows"]}
     first = rows["2018-12-31"]
     assert first["historical_universe_size"] == 1
+    assert first["scanned_security_count"] == 1
+    assert first["evaluable_security_count"] == 1
+    assert first["unevaluable_security_count"] == 0
+    assert first["evaluable_non_candidate_count"] == 0
+    assert first["evaluable_coverage_of_scanned"] == 1.0
+    assert first["distress_rate_of_evaluable"] == 1.0
     assert first["equity_distress_case_count"] == 1
     assert first["credit_linked_case_count"] == 1
     assert first["fresh_credit_case_count"] == 1
@@ -86,7 +96,13 @@ def test_population_coverage_cli_exposes_missing_credit_outcome_and_feature_cove
     assert first["fresh_credit_coverage_of_linked"] == 1.0
     assert first["source_labeled_case_count"] == 1
     assert first["survived_12m_labeled_count"] == 1
-    assert first["source_label_coverage_of_distress"] == 1.0
+    assert first["survived_12m_horizon_eligible_count"] == 1
+    assert first["survived_12m_missing_among_horizon_eligible_count"] == 0
+    assert first["survived_12m_label_coverage_of_horizon_eligible"] == 1.0
+    assert first["normalized_3y_horizon_eligible_count"] == 1
+    assert first["normalized_3y_labeled_count"] == 0
+    assert first["normalized_3y_missing_among_horizon_eligible_count"] == 1
+    assert first["normalized_3y_label_coverage_of_horizon_eligible"] == 0.0
     assert first["t0_feature_snapshot_count"] == 1
     assert first["liquidity_runway_feature_count"] == 1
     assert first["nearest_maturity_feature_count"] == 1
@@ -96,7 +112,25 @@ def test_population_coverage_cli_exposes_missing_credit_outcome_and_feature_cove
     assert first["feature_snapshot_coverage_of_distress"] == 1.0
 
     second = rows["2020-12-31"]
-    assert second["historical_universe_size"] == 1
+    assert second["historical_universe_size"] == 3
+    assert second["scanned_security_count"] == 3
+    assert second["evaluable_security_count"] == 2
+    assert second["unevaluable_security_count"] == 1
+    assert second["evaluable_non_candidate_count"] == 1
+    assert second["evaluable_coverage_of_scanned"] == 2 / 3
+    assert second["distress_rate_of_evaluable"] == 0.5
+    assert second["skip_reason_counts"] == [
+        {
+            "reason": "drawdown below configured distress threshold",
+            "count": 1,
+            "classification": "evaluable_non_candidate",
+        },
+        {
+            "reason": "no cutoff-date raw price",
+            "count": 1,
+            "classification": "unevaluable",
+        },
+    ]
     assert second["equity_distress_case_count"] == 1
     assert second["credit_linked_case_count"] == 0
     assert second["fresh_credit_case_count"] == 0
@@ -105,6 +139,18 @@ def test_population_coverage_cli_exposes_missing_credit_outcome_and_feature_cove
     assert second["fresh_credit_coverage_of_linked"] is None
     assert second["source_labeled_case_count"] == 0
     assert second["source_label_coverage_of_distress"] == 0.0
+    assert second["survived_12m_horizon_eligible_count"] == 1
+    assert second["survived_12m_labeled_count"] == 0
+    assert second["survived_12m_missing_among_horizon_eligible_count"] == 1
+    assert second["survived_12m_right_censored_count"] == 0
+    assert second["normalized_3y_horizon_eligible_count"] == 0
+    assert second["normalized_3y_labeled_count"] == 0
+    assert second["normalized_3y_early_resolved_count"] == 0
+    assert second["normalized_3y_right_censored_count"] == 1
+    assert second["normalized_3y_missing_among_horizon_eligible_count"] == 0
+    assert second["normalized_3y_label_coverage_of_horizon_eligible"] is None
+    assert second["equity_multiple_3y_horizon_eligible_count"] == 0
+    assert second["equity_multiple_3y_right_censored_count"] == 1
     assert second["t0_feature_snapshot_count"] == 1
     assert second["liquidity_runway_feature_count"] == 1
     assert second["nearest_maturity_feature_count"] == 0
@@ -112,11 +158,14 @@ def test_population_coverage_cli_exposes_missing_credit_outcome_and_feature_cove
     assert second["net_leverage_feature_count"] == 0
     assert second["impairment_type_feature_count"] == 0
 
+    assert any("unevaluable" in warning for warning in payload["warnings"])
+
     summary = markdown.read_text(encoding="utf-8")
     assert "Historical distress population coverage" in summary
-    assert "Link / distress" in summary
-    assert "Source labels / distress" in summary
-    assert "T0 features / distress" in summary
+    assert "Market evaluability" in summary
+    assert "Evaluable non-candidate" in summary
+    assert "Right-censored" in summary
+    assert "Missing among eligible" in summary
     assert "ex-post dataset coverage audit" in summary
 
 
