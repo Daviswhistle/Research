@@ -328,11 +328,13 @@ def build_trace_security_master_resolver(
 ) -> TraceSecurityMasterResolver:
     """Convert source-backed identity events into non-overlapping intervals.
 
-    Events on the same date are applied in the exact order supplied by the
-    source reader. This matters for chained same-day changes such as A->B->C:
-    B is an intermediate state, not an indefinitely active symbol. A later
-    source that reconfirms an unchanged Symbol/CUSIP splits provenance at that
-    source's availability date rather than being attached retroactively.
+    Daily List events are applied in source/input order before Security Master
+    snapshots on the same date. This preserves transition chains such as
+    A->B->C and prevents a same-day snapshot from reopening a symbol that the
+    Daily List already closed, unless a later explicit Daily List start reopened
+    that symbol first. A later source reconfirming an unchanged Symbol/CUSIP
+    splits provenance at that source's availability date rather than attaching
+    future evidence retroactively.
     """
 
     by_date: dict[date, list[TraceSecurityEvent]] = {}
@@ -395,13 +397,29 @@ def build_trace_security_master_resolver(
         )
 
     for effective_date in sorted(by_date):
-        # Preserve reader/input order within the day. Sorting by a textual source
-        # reference can reorder row10 before row2 and break transition chains.
-        for event in by_date[effective_date]:
+        day_events = by_date[effective_date]
+        # Security Master snapshots are snapshot-state evidence. Apply explicit
+        # Daily List transitions first so a stale same-day snapshot cannot undo a
+        # deletion/change that already closed the symbol on that date.
+        ordered_events = tuple(event for event in day_events if event.kind != "snapshot") + tuple(
+            event for event in day_events if event.kind == "snapshot"
+        )
+        closed_symbols: set[str] = set()
+        for event in ordered_events:
             if event.kind in {"delete", "change"} and event.old_symbol:
                 close_symbol(event.old_symbol, event.old_cusip, effective_date)
+                closed_symbols.add(event.old_symbol)
             if event.kind in {"add", "change", "snapshot"} and event.new_symbol and event.new_cusip:
+                if event.kind == "snapshot" and event.new_symbol in closed_symbols and event.new_symbol not in active:
+                    raise ValueError(
+                        f"TRACE Security Master snapshot on {effective_date.isoformat()} reopens symbol "
+                        f"{event.new_symbol} after a same-day Daily List close; sources are contradictory"
+                    )
                 start_symbol(event.new_symbol, event.new_cusip, event.source_ref, effective_date)
+                if event.kind != "snapshot":
+                    # A later explicit Daily List start can intentionally reopen a
+                    # symbol; snapshots may then corroborate that active state.
+                    closed_symbols.discard(event.new_symbol)
 
     for symbol, (cusip, started, refs) in active.items():
         intervals.append(TraceSecurityIdentityInterval(symbol, cusip, started, None, refs))
