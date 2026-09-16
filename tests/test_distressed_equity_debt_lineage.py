@@ -8,6 +8,7 @@ from distressed_equity.debt_lineage import (
     debt_lineage_event_template,
     debt_lineage_events_from_dict,
     debt_lineage_graph_to_dict,
+    debt_lineage_source_packet_fingerprint,
     debt_lineage_verification_template,
     promote_verified_debt_lineage_events,
     validate_debt_lineage_events_against_source_packet,
@@ -57,21 +58,30 @@ def exchange_event(*, predecessor_amount=600.0, successor_amount=550.0):
     }]}
 
 
-def verified_events(raw):
+def source_packet(*, analysis_date="2023-12-31", published_on="2023-02-02"):
+    return {"analysis_date": analysis_date, "spans": [{
+        "span_id": "s1", "source_accession": "new", "published_on": published_on,
+    }]}
+
+
+def verified_events(raw, *, packet=None):
+    packet = packet or source_packet()
     events = debt_lineage_events_from_dict(raw)
-    verification = debt_lineage_verification_template(events)
+    source_fingerprint = debt_lineage_source_packet_fingerprint(packet)
+    verification = debt_lineage_verification_template(
+        events,
+        source_packet_fingerprint=source_fingerprint,
+    )
     for review in verification["event_reviews"]:
         review.update({
             "status": "verified", "verifier": "test-verifier",
             "verified_on": "2026-09-16", "evidence_reopened": True,
         })
-    return promote_verified_debt_lineage_events(events, verification)
-
-
-def source_packet(*, analysis_date="2023-12-31", published_on="2023-02-02"):
-    return {"analysis_date": analysis_date, "spans": [{
-        "span_id": "s1", "source_accession": "new", "published_on": published_on,
-    }]}
+    return promote_verified_debt_lineage_events(
+        events,
+        verification,
+        source_packet_fingerprint=source_fingerprint,
+    )
 
 
 def test_partial_exchange_preserves_residual_predecessor_terminal():
@@ -190,17 +200,29 @@ def test_candidate_event_does_not_define_confirmed_topology():
 
 def test_verification_requires_reopened_evidence_and_matching_fingerprint():
     events = debt_lineage_events_from_dict(exchange_event())
-    verification = debt_lineage_verification_template(events)
+    source_fingerprint = debt_lineage_source_packet_fingerprint(source_packet())
+    verification = debt_lineage_verification_template(
+        events,
+        source_packet_fingerprint=source_fingerprint,
+    )
     verification["event_reviews"][0].update({
         "status": "verified", "verifier": "reviewer",
         "verified_on": "2026-09-16", "evidence_reopened": False,
     })
     with pytest.raises(ValueError, match="evidence was not re-opened"):
-        promote_verified_debt_lineage_events(events, verification)
+        promote_verified_debt_lineage_events(
+            events,
+            verification,
+            source_packet_fingerprint=source_fingerprint,
+        )
     verification["event_reviews"][0]["evidence_reopened"] = True
     changed = debt_lineage_events_from_dict(exchange_event(successor_amount=540.0))
     with pytest.raises(ValueError, match="fingerprint mismatch"):
-        promote_verified_debt_lineage_events(changed, verification)
+        promote_verified_debt_lineage_events(
+            changed,
+            verification,
+            source_packet_fingerprint=source_fingerprint,
+        )
 
 
 def test_participating_amount_hard_ceiling_only_on_event_date():
@@ -260,6 +282,7 @@ def test_serialization_and_template_expose_safety_boundaries():
     assert semantics["accounting_treatment_is_auto_inferred"] is False
     assert semantics["candidate_events_are_confirmed"] is False
     assert semantics["verified_requires_fingerprint_bound_reopened_evidence"] is True
+    assert semantics["verification_is_bound_to_frozen_source_packet"] is True
     assert semantics["snapshot_principal_is_event_ceiling_only_on_same_date"] is True
     assert semantics["mixed_currency_principal_is_auto_aggregated"] is False
     assert semantics["partial_predecessor_can_remain_terminal"] is True
