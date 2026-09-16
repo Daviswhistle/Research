@@ -176,9 +176,10 @@ def _clear_stale_lineage_artifacts(workspace: Path) -> None:
 
 
 def _clear_stale_bond_market_artifact(workspace: Path) -> None:
-    path = workspace / "bond_market.json"
-    if path.exists():
-        path.unlink()
+    for name in ("bond_market.json", "merged.json"):
+        path = workspace / name
+        if path.exists():
+            path.unlink()
 
 
 def main(argv: list[str] | None = None) -> int:
