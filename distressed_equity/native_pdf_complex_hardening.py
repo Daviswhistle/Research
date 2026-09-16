@@ -15,6 +15,7 @@ def install_complex_native_pdf_hardening(complex_module: Any) -> None:
     - instrument titles such as "Senior Secured Notes" win over generic header tokens;
     - sparse but explicit coordinate tables can be parsed without enabling sparse prose;
     - multiple transposed tables on one page are segmented rather than cross-linked;
+    - repeated footnote markers are scoped to the table segment that defines them;
     - transposed header footnotes are scoped to the instrument column that cites them.
     """
 
@@ -33,8 +34,6 @@ def install_complex_native_pdf_hardening(complex_module: Any) -> None:
             for fragment in row.fragments:
                 text = _strip_trailing_markers(fragment.text)
                 score = _identity_score(module, text)
-                # Instrument identity is more specific than a generic semantic
-                # token inside the title (e.g. "secured" or "notes").
                 if score >= 55:
                     identities.append((fragment.x, text))
                     continue
@@ -62,6 +61,40 @@ def install_complex_native_pdf_hardening(complex_module: Any) -> None:
         if first_field <= 0:
             return None
         return complex_module._transposed_header(native, rows, first_field, module)
+
+    def _definition_body(definition: Any) -> str:
+        return str(definition.text).rsplit(" | ", 1)[-1].strip()
+
+    def _definitions_for_rows(
+        rows: list[Any],
+        definitions: dict[str, list[Any]],
+    ) -> dict[str, list[Any]]:
+        """Restrict page-wide definitions to definitions physically in this segment.
+
+        Native PDF pages can reuse `(1)`, `(2)`, etc. in independent tables.
+        Marker equality alone is insufficient; match both canonical marker and the
+        parsed definition body present in the current row segment.
+        """
+
+        bodies_by_marker: dict[str, set[str]] = {}
+        for row in rows:
+            parsed = complex_module._parse_definition(row.text, allow_bare_number=True)
+            if not parsed:
+                continue
+            marker, body = parsed
+            bodies_by_marker.setdefault(marker, set()).add(body.strip())
+        if not bodies_by_marker:
+            return {}
+        output: dict[str, list[Any]] = {}
+        for marker, bodies in bodies_by_marker.items():
+            matched = [
+                definition
+                for definition in definitions.get(marker, [])
+                if _definition_body(definition) in bodies
+            ]
+            if matched:
+                output[marker] = matched
+        return output
 
     def _scope_candidate_footnotes(
         candidate: Any,
@@ -171,14 +204,14 @@ def install_complex_native_pdf_hardening(complex_module: Any) -> None:
         if not header_indices:
             return None
 
-        # One table preserves the established IDs; still scope its footnotes.
         if len(header_indices) == 1:
+            segment_definitions = _definitions_for_rows(page_rows, definitions)
             result = original_transposed_page(
                 native,
                 module,
                 page_rows,
                 document,
-                definitions,
+                segment_definitions,
                 max_candidates=max_candidates,
             )
             if not result:
@@ -189,7 +222,7 @@ def install_complex_native_pdf_hardening(complex_module: Any) -> None:
                 return result
             header_row, _ = header
             candidates = tuple(
-                _scope_candidate_footnotes(candidate, spans, header_row, definitions)
+                _scope_candidate_footnotes(candidate, spans, header_row, segment_definitions)
                 for candidate in candidates
             )
             return spans, candidates
@@ -201,12 +234,13 @@ def install_complex_native_pdf_hardening(complex_module: Any) -> None:
                 break
             end = header_indices[segment_number] if segment_number < len(header_indices) else len(page_rows)
             segment_rows = page_rows[start:end]
+            segment_definitions = _definitions_for_rows(segment_rows, definitions)
             result = original_transposed_page(
                 native,
                 module,
                 segment_rows,
                 document,
-                definitions,
+                segment_definitions,
                 max_candidates=max_candidates - len(all_candidates),
             )
             if not result:
@@ -217,7 +251,7 @@ def install_complex_native_pdf_hardening(complex_module: Any) -> None:
                 continue
             header_row, _ = header
             candidates = tuple(
-                _scope_candidate_footnotes(candidate, spans, header_row, definitions)
+                _scope_candidate_footnotes(candidate, spans, header_row, segment_definitions)
                 for candidate in candidates
             )
             spans, candidates = _remap_segment_ids(spans, candidates, segment_number)
