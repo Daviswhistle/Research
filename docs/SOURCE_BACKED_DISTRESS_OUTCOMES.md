@@ -274,7 +274,7 @@ common cancelled
 
 필요하면 두 fact를 각각 별도로 입증한다. 한쪽에서 다른 쪽을 추론하지 않는다.
 
-자세한 설계는 `docs/FINAL_SHAREHOLDER_PAYOFFS.md`를 본다.
+자세한 설계는 `docs/FINAL_SHAREHOLDER_PAYOFF.md`를 본다.
 
 ## Horizon 경계
 
@@ -412,7 +412,7 @@ Terminal fact로 조기 확정된 `false`와 final-payoff fact로 조기 확정�
 
 따라서 2020 T0 기업이 2021년에 fixed-cash acquisition으로 최종 4.0x payoff가 확정됐다면, 2022 target prior에서는 사용할 수 있지만 2021 payoff 확정 전 target prior에는 사용할 수 없다.
 
-자세한 내용은 `docs/WALK_FORWARD_PRIORS.md`와 `docs/FINAL_SHAREHOLDER_PAYOFFS.md`를 본다.
+자세한 내용은 `docs/WALK_FORWARD_PRIORS.md`와 `docs/FINAL_SHAREHOLDER_PAYOFF.md`를 본다.
 
 ## 실제 probability calibration으로 가는 길
 
