@@ -43,7 +43,7 @@ def _document():
     )
 
 
-def test_two_transposed_tables_on_one_pdf_page_remain_separate_and_scope_footnotes():
+def test_two_transposed_tables_on_one_pdf_page_reusing_same_marker_keep_local_definitions():
     result = extract_native_pdf_debt_candidates(
         sec_instruments,
         _pdf([
@@ -52,11 +52,12 @@ def test_two_transposed_tables_on_one_pdf_page_remain_separate_and_scope_footnot
             (40, 700, "Maturity"), (200, 700, "2028-06-15"),
             (40, 675, "CUSIP"), (200, 675, "123456789"),
             (40, 650, "(1) First-note covenant footnote."),
-            (40, 600, "Term"), (200, 600, "6.00% Senior Notes due 2030 (2)"),
+            # A second, independent table resets numbering and reuses marker (1).
+            (40, 600, "Term"), (200, 600, "6.00% Senior Notes due 2030 (1)"),
             (40, 575, "Principal ($ millions)"), (200, 575, "400"),
             (40, 550, "Maturity"), (200, 550, "2030-06-15"),
             (40, 525, "CUSIP"), (200, 525, "987654321"),
-            (40, 500, "(2) Second-note collateral footnote."),
+            (40, 500, "(1) Second-note collateral footnote."),
         ]),
         _document(),
         max_candidates=20,
