@@ -177,8 +177,9 @@ class EodhdBondProvider:
         if malformed:
             sample = malformed[:3]
             raise RuntimeError(
-                "EODHD .BOND response contained incompatible rows; refusing partial acceptance "
-                f"or reinterpretation as bond data (sample={sample})"
+                "EODHD .BOND response did not consistently expose the documented bond price/yield shape; "
+                "incompatible rows were present, so partial acceptance and reinterpretation as bond data were refused "
+                f"(sample={sample})"
             )
         result = tuple(sorted(output, key=lambda item: item.date))
         self._bond_cache[cache_key] = result
