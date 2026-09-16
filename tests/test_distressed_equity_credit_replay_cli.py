@@ -6,12 +6,13 @@ from pathlib import Path
 from distressed_equity.credit_replay_cli import main
 
 
-def test_credit_replay_cli_runs_full_point_in_time_outcome_pipeline(tmp_path: Path):
+def test_credit_replay_cli_runs_full_point_in_time_outcome_and_feature_pipeline(tmp_path: Path):
     securities = tmp_path / "securities.csv"
     prices = tmp_path / "prices.csv"
     links = tmp_path / "credit_links.csv"
     bonds = tmp_path / "bonds.csv"
     source_outcomes = tmp_path / "source_outcomes.csv"
+    survival_features = tmp_path / "survival_features.csv"
     output = tmp_path / "joint.json"
     markdown = tmp_path / "joint.md"
 
@@ -48,6 +49,14 @@ def test_credit_replay_cli_runs_full_point_in_time_outcome_pipeline(tmp_path: Pa
         "SEC:8-K:001;COURT:case-1,verified,reviewer,2026-01-01,true,verified sources\n",
         encoding="utf-8",
     )
+    survival_features.write_text(
+        "security_id,analysis_date,evidence_known_date,liquidity_runway_months,nearest_maturity_months,"
+        "covenant_headroom_pct,net_leverage,impairment_type,evidence_refs,verification_status,verifier,verified_on,"
+        "evidence_reopened,notes\n"
+        "sec-1,2022-12-31,2022-12-30,18,30,15,5.5,temporary,SEC:10-Q:001;CREDIT:001,"
+        "verified,reviewer,2026-01-01,true,verified T0 features\n",
+        encoding="utf-8",
+    )
 
     assert main([
         "--analysis-date", "2022-12-31",
@@ -57,6 +66,8 @@ def test_credit_replay_cli_runs_full_point_in_time_outcome_pipeline(tmp_path: Pa
         "--bond-observations-csv", str(bonds),
         "--outcome-cutoff", "2026-01-31",
         "--source-outcomes-csv", str(source_outcomes),
+        "--survival-features-csv", str(survival_features),
+        "--feature-strata-dimensions", "liquidity_runway,nearest_maturity,covenant_headroom,net_leverage,impairment_type",
         "--output", str(output),
         "--markdown-output", str(markdown),
     ]) == 0
@@ -108,11 +119,37 @@ def test_credit_replay_cli_runs_full_point_in_time_outcome_pipeline(tmp_path: Pa
     assert source_stress["three_x_3y_rate"] == 1.0
     assert source_stress["median_equity_multiple_3y"] == 3.0
 
+    feature_rates = payload["feature_strata_base_rates"]
+    assert feature_rates["feature_snapshot_count"] == 1
+    assert feature_rates["known_source_label_count"] == 1
+    strata = {
+        (item["dimension"], item["bucket"], item["credit_group"]): item
+        for item in feature_rates["strata"]
+    }
+    liquidity = strata[("liquidity_runway", "12-<24m", "fresh_credit_stress")]
+    assert liquidity["cohort_case_count"] == 1
+    assert liquidity["source_labeled_case_count"] == 1
+    assert liquidity["survived_12m_rate"] == 1.0
+    maturity = strata[("nearest_maturity", "24-<36m", "fresh_credit_stress")]
+    assert maturity["existing_common_survival_rate"] == 1.0
+    headroom = strata[("covenant_headroom", "10-<25%", "fresh_credit_stress")]
+    assert headroom["normalized_within_3y_rate"] == 1.0
+    leverage = strata[("net_leverage", "4-<6x", "fresh_credit_stress")]
+    assert leverage["three_x_3y_rate"] == 1.0
+    impairment = strata[("impairment_type", "temporary", "fresh_credit_stress")]
+    assert impairment["median_equity_multiple_3y"] == 3.0
+
     summary = markdown.read_text(encoding="utf-8")
     assert "Joint equity / credit distress replay" in summary
     assert "Market-observable outcomes" in summary
     assert "Market-observable base-rate comparison" in summary
     assert "Verified legal / business outcome base rates" in summary
+    assert "T0 survival-feature strata" in summary
+    assert "12-<24m" in summary
+    assert "24-<36m" in summary
+    assert "10-<25%" in summary
+    assert "4-<6x" in summary
+    assert "temporary" in summary
     assert "fresh_credit_stress" in summary
     assert "TEST" in summary
     assert "55.0" in summary
@@ -122,6 +159,7 @@ def test_credit_replay_cli_runs_full_point_in_time_outcome_pipeline(tmp_path: Pa
     assert "not labels for corporate survival" in summary
     assert "not bankruptcy/common-survival rates" in summary
     assert "Missing labels stay missing" in summary
+    assert "not universal causal thresholds" in summary
 
 
 def test_source_outcomes_require_explicit_outcome_cutoff(tmp_path: Path):
@@ -161,3 +199,43 @@ def test_source_outcomes_require_explicit_outcome_cutoff(tmp_path: Path):
         assert "requires --outcome-cutoff" in str(exc)
     else:
         raise AssertionError("expected source outcome labels without a knowledge cutoff to be rejected")
+
+
+def test_survival_features_require_source_outcomes(tmp_path: Path):
+    securities = tmp_path / "securities.csv"
+    prices = tmp_path / "prices.csv"
+    links = tmp_path / "credit_links.csv"
+    bonds = tmp_path / "bonds.csv"
+    features = tmp_path / "features.csv"
+    securities.write_text(
+        "security_id,symbol,name,exchange,asset_type,start_date,end_date\nsec-1,T,T,NYSE,stock,2010-01-01,\n",
+        encoding="utf-8",
+    )
+    prices.write_text(
+        "security_id,symbol,date,close,adjusted_close\nsec-1,T,2022-12-31,5,5\n",
+        encoding="utf-8",
+    )
+    links.write_text(
+        "security_id,cusip,isin,start_date,end_date,source\nsec-1,111111AA1,,2020-01-01,,x\n",
+        encoding="utf-8",
+    )
+    bonds.write_text(
+        "date,cusip,price_pct_par,yield_pct,source\n2022-12-30,111111AA1,55,20,x\n",
+        encoding="utf-8",
+    )
+    features.write_text("placeholder\n", encoding="utf-8")
+
+    try:
+        main([
+            "--analysis-date", "2022-12-31",
+            "--securities-csv", str(securities),
+            "--prices-csv", str(prices),
+            "--credit-links-csv", str(links),
+            "--bond-observations-csv", str(bonds),
+            "--outcome-cutoff", "2026-01-31",
+            "--survival-features-csv", str(features),
+        ])
+    except ValueError as exc:
+        assert "requires --source-outcomes-csv" in str(exc)
+    else:
+        raise AssertionError("expected survival feature strata without source outcomes to be rejected")
