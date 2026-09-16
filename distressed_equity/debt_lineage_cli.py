@@ -11,6 +11,7 @@ from .debt_lineage import (
     debt_lineage_event_template,
     debt_lineage_events_from_dict,
     debt_lineage_graph_to_dict,
+    debt_lineage_source_packet_fingerprint,
     debt_lineage_verification_template,
     promote_verified_debt_lineage_events,
     validate_debt_lineage_events_against_source_packet,
@@ -33,11 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--template-output", help="Write an event template containing available stable IDs")
     parser.add_argument(
         "--verification-template-output",
-        help="Write fingerprint-bound verification template for the supplied candidate events",
+        help="Write verification template bound to the supplied candidate events and frozen source packet",
     )
     parser.add_argument(
         "--verification",
-        help="Verification JSON; only events with matching fingerprint and reopened evidence are promoted to verified",
+        help="Verification JSON; matching event and frozen-source fingerprints are required for promotion",
     )
     parser.add_argument("--match-threshold", type=float, default=55.0)
     parser.add_argument("--ambiguity-margin", type=float, default=8.0)
@@ -65,8 +66,15 @@ def _write(path: str | Path, payload: object) -> None:
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _same_path(left: str | Path, right: str | Path) -> bool:
+    return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if (args.verification_template_output or args.verification) and not args.source_packet:
+        raise ValueError("lineage verification requires --source-packet so approval is bound to frozen evidence")
+
     raw_instruments = _load(args.instruments)
     source_packet = _load_object(args.source_packet) if args.source_packet else None
     source_warnings: list[str] = []
@@ -112,15 +120,32 @@ def main(argv: list[str] | None = None) -> int:
             )
         events = event_validation.events
         source_warnings.extend(event_validation.warnings)
+        source_fingerprint = debt_lineage_source_packet_fingerprint(source_packet)
     else:
         events = debt_lineage_events_from_dict(raw_events)
+        source_fingerprint = None
 
+    verification = _load_object(args.verification) if args.verification else None
     if args.verification_template_output:
-        _write(args.verification_template_output, debt_lineage_verification_template(events))
+        if verification is None or not _same_path(args.verification_template_output, args.verification):
+            if source_fingerprint is None:
+                raise ValueError("verification template requires a frozen source packet fingerprint")
+            _write(
+                args.verification_template_output,
+                debt_lineage_verification_template(
+                    events,
+                    source_packet_fingerprint=source_fingerprint,
+                ),
+            )
 
-    if args.verification:
-        verification = _load_object(args.verification)
-        events = promote_verified_debt_lineage_events(events, verification)
+    if verification is not None:
+        if source_fingerprint is None:
+            raise ValueError("verification promotion requires a frozen source packet fingerprint")
+        events = promote_verified_debt_lineage_events(
+            events,
+            verification,
+            source_packet_fingerprint=source_fingerprint,
+        )
 
     lineage = build_debt_lineage_graph(ledger, events)
     payload = {
@@ -131,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.output:
         _write(args.output, payload)
         print(args.output)
-    elif args.verification_template_output and not args.verification:
+    elif args.verification_template_output and verification is None:
         print(args.verification_template_output)
     else:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
