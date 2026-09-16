@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from . import sec_instruments
+from .complex_table_debt_extraction import install_complex_table_extraction
 from .native_pdf_debt_extraction import (
     _MIN_NATIVE_FRAGMENTS,
     _MIN_NATIVE_TEXT_CHARS,
@@ -166,11 +167,17 @@ def install_document_aware_extraction(module: Any) -> None:
 
     This makes source-graph, locator-less-contract and named-entity paths PDF-safe
     without requiring each caller to special-case binary documents. HTML behavior
-    remains delegated to the already-installed structured extractor.
+    remains delegated to the installed structured + complex-table extractors.
     """
 
     if getattr(module, "_document_aware_extraction_installed", False):
         return
+
+    # Structured extraction is installed immediately before this hook. Extend that
+    # HTML path with orientation-aware / multi-row / footnote-aware table parsing,
+    # then capture the resulting callable below so every downstream document path
+    # sees the same behavior.
+    install_complex_table_extraction(module)
 
     original_get_text = module._get_text
     original_extract = module.extract_source_candidates
