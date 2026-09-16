@@ -167,6 +167,31 @@ def test_eodhd_bond_provider_uses_explicit_identifier_and_tenor_matched_treasury
     assert any(url.endswith("/ust/yield-rates") for url, _ in session.calls)
 
 
+def test_eodhd_bond_provider_refuses_generic_ohlc_payload_as_bond_data():
+    class StockLikeSession:
+        def get(self, url, params=None, timeout=None):
+            if "/eod/" in url:
+                return FakeResponse([
+                    {
+                        "date": "2022-12-30", "open": 60.0, "high": 61.0,
+                        "low": 58.0, "close": 59.0, "volume": 120000,
+                    }
+                ])
+            return FakeResponse({"data": []})
+
+    provider = EodhdBondProvider(api_key="test", session=StockLikeSession())
+    try:
+        provider.observations(
+            cusip="111111AA1", isin=None,
+            start=date(2022, 12, 1), end=date(2022, 12, 31),
+        )
+    except RuntimeError as exc:
+        assert "documented bond price/yield shape" in str(exc)
+        assert "close" in str(exc)
+    else:
+        raise AssertionError("expected generic OHLC payload to be rejected as non-bond data")
+
+
 def test_stale_bond_observation_is_flagged_not_silently_treated_as_cutoff_price():
     class StaleProvider(FakeProvider):
         def observations(self, *, cusip, isin, start, end):
