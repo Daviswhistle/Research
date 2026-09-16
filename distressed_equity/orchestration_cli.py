@@ -9,6 +9,12 @@ from typing import Any
 
 from .alpha_vantage import AlphaVantageProvider
 from .debt_instruments import build_debt_instrument_ledger, debt_instrument_ledger_to_dict, debt_snapshots_from_dict
+from .debt_lineage import (
+    build_debt_lineage_graph,
+    debt_lineage_event_template,
+    debt_lineage_graph_to_dict,
+    validate_debt_lineage_events_against_source_packet,
+)
 from .instrument_verification import validate_debt_snapshots_against_source_packet
 from .orchestration import ResearchBundle, build_research_bundle, ingest_research_bundle, render_research_summary
 from .sec import SecClient, normalize_cik
@@ -67,6 +73,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--debt-instruments",
         help="Optional JSON containing verified filing-level debt instrument snapshots for stable-ID matching",
+    )
+    parser.add_argument(
+        "--debt-lineage",
+        help="Optional source-backed debt exchange/modification/extinguishment event JSON; requires --debt-instruments",
     )
     parser.add_argument("--allow-overwrite", action="store_true")
     parser.add_argument("--apply-low-confidence", action="store_true")
@@ -208,8 +218,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         _write_bundle_artifacts(workspace, bundle)
 
+    debt_ledger = None
     debt_ledger_payload = None
+    debt_lineage_payload = None
     debt_source_validation_warnings: tuple[str, ...] = ()
+    debt_lineage_validation_warnings: tuple[str, ...] = ()
     if args.debt_instruments:
         raw_debt = _load_json_any(args.debt_instruments)
         source_packet = bundle.packet.get("debt_instrument_source_packet")
@@ -221,9 +234,31 @@ def main(argv: list[str] | None = None) -> int:
             debt_source_validation_warnings = source_validation.warnings
         else:
             snapshots = debt_snapshots_from_dict(raw_debt)
-        ledger = build_debt_instrument_ledger(snapshots)
-        debt_ledger_payload = debt_instrument_ledger_to_dict(ledger)
+        debt_ledger = build_debt_instrument_ledger(snapshots)
+        debt_ledger_payload = debt_instrument_ledger_to_dict(debt_ledger)
         _write_json(workspace / "debt_instrument_ledger.json", debt_ledger_payload)
+        _write_json(workspace / "debt_lineage_template.json", debt_lineage_event_template(debt_ledger))
+
+    if args.debt_lineage:
+        if debt_ledger is None:
+            raise ValueError("--debt-lineage requires --debt-instruments")
+        source_packet = bundle.packet.get("debt_instrument_source_packet")
+        if not isinstance(source_packet, dict):
+            raise ValueError("workspace debt lineage requires a frozen debt_instrument_source_packet")
+        raw_lineage = _load_json_any(args.debt_lineage)
+        lineage_validation = validate_debt_lineage_events_against_source_packet(
+            source_packet,
+            raw_lineage,
+            debt_ledger,
+        )
+        if not lineage_validation.valid:
+            raise ValueError(
+                "invalid source-backed debt lineage events: " + "; ".join(lineage_validation.errors)
+            )
+        debt_lineage_validation_warnings = lineage_validation.warnings
+        lineage = build_debt_lineage_graph(debt_ledger, lineage_validation.events)
+        debt_lineage_payload = debt_lineage_graph_to_dict(lineage)
+        _write_json(workspace / "debt_lineage.json", debt_lineage_payload)
 
     merged = None
     if args.result:
@@ -236,6 +271,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         if debt_ledger_payload is not None:
             merged["debt_instrument_ledger"] = debt_ledger_payload
+        if debt_lineage_payload is not None:
+            merged["debt_lineage"] = debt_lineage_payload
         _write_json(workspace / "merged.json", merged)
 
     summary = render_research_summary(bundle, merged)
@@ -245,9 +282,30 @@ def main(argv: list[str] | None = None) -> int:
             f"- Versions: {len(debt_ledger_payload['versions'])}\n"
             f"- Amendment/change candidates: {len(debt_ledger_payload['changes'])}\n"
             f"- New/unmatched stable IDs: {len(debt_ledger_payload['unmatched_versions'])}\n"
+            "- Lineage research template: debt_lineage_template.json\n"
         )
         if debt_source_validation_warnings:
             summary += "- Source validation warnings: " + "; ".join(debt_source_validation_warnings) + "\n"
+    if debt_lineage_payload is not None:
+        events = debt_lineage_payload["events"]
+        impacts = debt_lineage_payload["impacts"]
+        verified = sum(1 for event in events if event["status"] == "verified")
+        candidates = sum(1 for event in events if event["status"] == "candidate")
+        explicit_accounting = sum(
+            1
+            for impact in impacts
+            if impact["accounting_treatment"] not in {"undetermined", "not_applicable"}
+        )
+        summary += (
+            "\n## Debt exchange / modification lineage\n\n"
+            f"- Events: {len(events)} (verified {verified}, candidate {candidates})\n"
+            f"- Root instruments: {len(debt_lineage_payload['root_instruments'])}\n"
+            f"- Terminal instruments: {len(debt_lineage_payload['terminal_instruments'])}\n"
+            f"- Events with explicit accounting treatment: {explicit_accounting}\n"
+            f"- Unresolved/candidate events: {len(debt_lineage_payload['unresolved_events'])}\n"
+        )
+        if debt_lineage_validation_warnings:
+            summary += "- Lineage source validation warnings: " + "; ".join(debt_lineage_validation_warnings) + "\n"
     (workspace / "summary.md").write_text(summary, encoding="utf-8")
 
     print(workspace / "summary.md")
