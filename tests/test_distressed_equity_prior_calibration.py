@@ -45,6 +45,7 @@ def _outcome(
     multiple: float,
     multiple_known: str,
 ) -> dict[str, str]:
+    normalized = multiple >= 3.0
     return {
         "security_id": security_id,
         "ticker": security_id,
@@ -56,7 +57,9 @@ def _outcome(
         "existing_common_survived_12m": str(common).lower(),
         "existing_common_survived_12m_known_date": f"{int(analysis_date[:4]) + 1}{analysis_date[4:]}",
         "existing_common_survived_12m_evidence_refs": f"SEC:{security_id}:COMMON",
-        "normalized_within_3y": "",
+        "normalized_within_3y": str(normalized).lower(),
+        "normalized_within_3y_known_date": multiple_known,
+        "normalized_within_3y_evidence_refs": f"SEC:{security_id}:NORMALIZED",
         "equity_multiple_3y": str(multiple),
         "equity_multiple_3y_known_date": multiple_known,
         "equity_multiple_3y_evidence_refs": f"SEC:{security_id}:MULTIPLE",
@@ -150,6 +153,11 @@ def test_prior_calibration_keeps_forecast_families_separate_and_computes_brier(t
     assert feature_survival.forecast_count == 2
     assert feature_survival.brier_score == pytest.approx(0.10)
 
+    normalized = summaries[("credit_group", "normalized_within_3y")]
+    assert normalized.forecast_count == 2
+    assert normalized.observed_rate == 0.5
+    assert normalized.brier_score == pytest.approx(0.10)
+
     three_x = summaries[("credit_group", "three_x_3y")]
     assert three_x.forecast_count == 2
     assert three_x.observed_rate == 0.5
@@ -186,6 +194,7 @@ def test_evaluation_cutoff_masks_later_three_year_outcome_but_keeps_known_12m_me
     metrics = {(row.basis, row.metric) for row in report.observations}
     assert ("credit_group", "survived_12m") in metrics
     assert ("credit_group", "existing_common_survival") in metrics
+    assert ("credit_group", "normalized_within_3y") not in metrics
     assert ("credit_group", "three_x_3y") not in metrics
     assert ("liquidity_runway", "three_x_3y") not in metrics
 
