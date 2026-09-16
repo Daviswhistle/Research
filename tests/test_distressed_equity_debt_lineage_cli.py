@@ -3,6 +3,7 @@ import json
 import pytest
 
 from distressed_equity.debt_lineage_cli import main
+from distressed_equity.instrument_verification import debt_snapshot_verification_template
 
 
 def write_json(path, payload):
@@ -19,30 +20,29 @@ def source_packet():
     }
 
 
-def snapshot_verification():
-    return {
-        "status": "verified",
-        "verifier": "snapshot-reviewer",
-        "verified_on": "2026-09-16",
-        "evidence_reopened": True,
-    }
-
-
-def instruments():
-    return {"instruments": [
+def instruments(packet=None):
+    packet = packet or source_packet()
+    raw = {"instruments": [
         {
             "as_of_date": "2023-01-01", "source_accession": "old", "name": "Old Notes",
             "principal": 1000.0, "maturity_year": 2025, "secured": False,
             "cusip": "111111AA1", "source_refs": ["old-span"],
-            "verification": snapshot_verification(),
         },
         {
             "as_of_date": "2023-03-31", "source_accession": "new", "name": "New Notes",
             "principal": 550.0, "maturity_year": 2028, "secured": True,
             "cusip": "222222BB2", "source_refs": ["new-span"],
-            "verification": snapshot_verification(),
         },
     ]}
+    bound = debt_snapshot_verification_template(packet, raw)
+    for row in bound["instruments"]:
+        row["verification"].update({
+            "status": "verified",
+            "verifier": "snapshot-reviewer",
+            "verified_on": "2026-09-16",
+            "evidence_reopened": True,
+        })
+    return bound
 
 
 def events():
@@ -56,8 +56,9 @@ def events():
 
 
 def test_cli_preserves_in_place_verification_file(tmp_path):
-    source = tmp_path / "source.json"; write_json(source, source_packet())
-    debt = tmp_path / "debt.json"; write_json(debt, instruments())
+    packet = source_packet()
+    source = tmp_path / "source.json"; write_json(source, packet)
+    debt = tmp_path / "debt.json"; write_json(debt, instruments(packet))
     event_path = tmp_path / "events.json"; write_json(event_path, events())
     verification = tmp_path / "verification.json"
     output = tmp_path / "lineage.json"
