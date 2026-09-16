@@ -108,7 +108,7 @@ def test_partial_exchange_preserves_residual_predecessor_terminal():
 
 def test_full_exchange_removes_fully_consumed_predecessor_from_terminals():
     graph = build_debt_lineage_graph(
-        exchange_ledger(), verified_events(exchange_event(predecessor_amount=1_000.0))
+        same_day_exchange_ledger(), verified_events(exchange_event(predecessor_amount=1_000.0))
     )
     assert graph.terminal_instruments == ("CUSIP:222222BB2",)
 
