@@ -13,6 +13,8 @@ from .debt_lineage import (
     build_debt_lineage_graph,
     debt_lineage_event_template,
     debt_lineage_graph_to_dict,
+    debt_lineage_verification_template,
+    promote_verified_debt_lineage_events,
     validate_debt_lineage_events_against_source_packet,
 )
 from .instrument_verification import validate_debt_snapshots_against_source_packet
@@ -76,7 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--debt-lineage",
-        help="Optional source-backed debt exchange/modification/extinguishment event JSON; requires --debt-instruments",
+        help="Optional source-backed candidate debt lineage JSON; requires --debt-instruments",
+    )
+    parser.add_argument(
+        "--debt-lineage-verification",
+        help="Fingerprint-bound lineage verification JSON; requires --debt-lineage",
     )
     parser.add_argument("--allow-overwrite", action="store_true")
     parser.add_argument("--apply-low-confidence", action="store_true")
@@ -179,6 +185,9 @@ def main(argv: list[str] | None = None) -> int:
     workspace.mkdir(parents=True, exist_ok=True)
     packet_path = workspace / "research_packet.json"
 
+    if args.debt_lineage_verification and not args.debt_lineage:
+        raise ValueError("--debt-lineage-verification requires --debt-lineage")
+
     if packet_path.exists() and not args.refresh:
         bundle = _bundle_from_frozen_packet(
             _load_json(packet_path),
@@ -256,7 +265,15 @@ def main(argv: list[str] | None = None) -> int:
                 "invalid source-backed debt lineage events: " + "; ".join(lineage_validation.errors)
             )
         debt_lineage_validation_warnings = lineage_validation.warnings
-        lineage = build_debt_lineage_graph(debt_ledger, lineage_validation.events)
+        events = lineage_validation.events
+        verification_template = debt_lineage_verification_template(events)
+        _write_json(workspace / "debt_lineage_verification_template.json", verification_template)
+        if args.debt_lineage_verification:
+            events = promote_verified_debt_lineage_events(
+                events,
+                _load_json(args.debt_lineage_verification),
+            )
+        lineage = build_debt_lineage_graph(debt_ledger, events)
         debt_lineage_payload = debt_lineage_graph_to_dict(lineage)
         _write_json(workspace / "debt_lineage.json", debt_lineage_payload)
 
@@ -303,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
             f"- Terminal instruments: {len(debt_lineage_payload['terminal_instruments'])}\n"
             f"- Events with explicit accounting treatment: {explicit_accounting}\n"
             f"- Unresolved/candidate events: {len(debt_lineage_payload['unresolved_events'])}\n"
+            "- Verification template: debt_lineage_verification_template.json\n"
         )
         if debt_lineage_validation_warnings:
             summary += "- Lineage source validation warnings: " + "; ".join(debt_lineage_validation_warnings) + "\n"
