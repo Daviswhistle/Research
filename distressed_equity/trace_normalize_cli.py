@@ -127,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
             "secondary_market_only": config.secondary_market_only,
         },
         "parsed_record_count": result.parsed_record_count,
+        "exact_duplicate_record_count": result.exact_duplicate_record_count,
         "active_record_count": result.active_record_count,
         "included_record_count": result.included_record_count,
         "daily_observation_count": len(result.observations),
