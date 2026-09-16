@@ -261,9 +261,11 @@ def _event_from_dict(raw: dict[str, Any]) -> DebtLineageEvent:
 def _validate_event_shape(event: DebtLineageEvent) -> None:
     predecessor_ids = [item.stable_id for item in event.predecessors]
     successor_ids = [item.stable_id for item in event.successors]
-    if len(predecessor_ids) != len(set(predecessor_ids)):
+    predecessor_set = set(predecessor_ids)
+    successor_set = set(successor_ids)
+    if len(predecessor_ids) != len(predecessor_set):
         raise ValueError(f"{event.event_id}: duplicate predecessor stable_id")
-    if len(successor_ids) != len(set(successor_ids)):
+    if len(successor_ids) != len(successor_set):
         raise ValueError(f"{event.event_id}: duplicate successor stable_id")
     if not event.source_refs:
         raise ValueError(f"{event.event_id}: source_refs are required")
@@ -278,9 +280,20 @@ def _validate_event_shape(event: DebtLineageEvent) -> None:
     elif event.event_type in {"exchange", "refinancing", "conversion"}:
         if not event.predecessors or not event.successors:
             raise ValueError(f"{event.event_id}: {event.event_type} requires predecessor and successor instruments")
+        overlap = sorted(predecessor_set & successor_set)
+        if overlap:
+            raise ValueError(
+                f"{event.event_id}: {event.event_type} predecessor/successor stable IDs must be disjoint; "
+                f"unchanged residual debt stays outside the event: {', '.join(overlap)}"
+            )
     elif event.event_type in {"redemption", "repurchase", "termination"}:
         if not event.predecessors:
             raise ValueError(f"{event.event_id}: {event.event_type} requires predecessor instruments")
+        if event.successors:
+            raise ValueError(
+                f"{event.event_id}: {event.event_type} must not have successor instruments; "
+                "use refinancing/exchange when debt is replaced"
+            )
     elif event.event_type == "issuance":
         if event.predecessors or not event.successors:
             raise ValueError(f"{event.event_id}: issuance requires successors and no predecessors")
@@ -331,12 +344,36 @@ def _boundary_snapshot(
     if predecessor:
         eligible = [item.snapshot for item in versions if item.snapshot.as_of_date <= event_date]
         if eligible:
-            return eligible[-1], None
-        return versions[0].snapshot, "predecessor first observed after event effective date"
+            snapshot = eligible[-1]
+            warning = None
+            if snapshot.as_of_date != event_date:
+                warning = (
+                    f"predecessor observation date {snapshot.as_of_date.isoformat()} differs from "
+                    f"event effective date {event_date.isoformat()}"
+                )
+            return snapshot, warning
+        snapshot = versions[0].snapshot
+        return (
+            snapshot,
+            f"predecessor first observed {snapshot.as_of_date.isoformat()} after event effective date "
+            f"{event_date.isoformat()}",
+        )
     eligible = [item.snapshot for item in versions if item.snapshot.as_of_date >= event_date]
     if eligible:
-        return eligible[0], None
-    return versions[-1].snapshot, "successor last observed before event effective date"
+        snapshot = eligible[0]
+        warning = None
+        if snapshot.as_of_date != event_date:
+            warning = (
+                f"successor observation date {snapshot.as_of_date.isoformat()} differs from "
+                f"event effective date {event_date.isoformat()}"
+            )
+        return snapshot, warning
+    snapshot = versions[-1].snapshot
+    return (
+        snapshot,
+        f"successor last observed {snapshot.as_of_date.isoformat()} before event effective date "
+        f"{event_date.isoformat()}",
+    )
 
 
 def _participant_amount(
@@ -344,6 +381,34 @@ def _participant_amount(
     snapshot: DebtInstrumentSnapshot,
 ) -> float | None:
     return participant.amount if participant.amount is not None else snapshot.principal
+
+
+def _amount_exceeds_snapshot(
+    participant: DebtLineageParticipation,
+    snapshot: DebtInstrumentSnapshot,
+) -> bool:
+    if participant.amount is None or snapshot.principal is None:
+        return False
+    tolerance = max(1e-9, abs(snapshot.principal) * 1e-9)
+    return participant.amount > snapshot.principal + tolerance
+
+
+def _amount_observation_warning(
+    participant: DebtLineageParticipation,
+    snapshot: DebtInstrumentSnapshot,
+    event_date: date,
+    *,
+    role: str,
+) -> str | None:
+    if not _amount_exceeds_snapshot(participant, snapshot):
+        return None
+    if snapshot.as_of_date == event_date:
+        return None
+    return (
+        f"{role} event amount {participant.amount} for {participant.stable_id} exceeds nearest observed "
+        f"principal {snapshot.principal} on {snapshot.as_of_date.isoformat()}; observation is not on the "
+        "event date, so it is not used as a hard ceiling"
+    )
 
 
 def _sum_known(values: Iterable[float | None]) -> float | None:
@@ -405,6 +470,11 @@ def _impact_for_event(
         predecessor_snapshots.append(snapshot)
         if warning:
             unresolved.append(f"{participant.stable_id}: {warning}")
+        amount_warning = _amount_observation_warning(
+            participant, snapshot, event.effective_date, role="predecessor"
+        )
+        if amount_warning:
+            unresolved.append(amount_warning)
     for participant in event.successors:
         snapshot, warning = _boundary_snapshot(
             versions_by_id[participant.stable_id], event.effective_date, predecessor=False
@@ -412,6 +482,11 @@ def _impact_for_event(
         successor_snapshots.append(snapshot)
         if warning:
             unresolved.append(f"{participant.stable_id}: {warning}")
+        amount_warning = _amount_observation_warning(
+            participant, snapshot, event.effective_date, role="successor"
+        )
+        if amount_warning:
+            unresolved.append(amount_warning)
 
     predecessor_principal = _sum_known(
         _participant_amount(participant, snapshot)
@@ -534,11 +609,13 @@ def build_debt_lineage_graph(
                 versions_by_id[participant.stable_id], event.effective_date, predecessor=True
             )
             amount = _participant_amount(participant, snapshot)
-            if participant.amount is not None and snapshot.principal is not None:
-                if participant.amount > snapshot.principal + max(1e-9, abs(snapshot.principal) * 1e-9):
-                    raise ValueError(
-                        f"{event.event_id}: predecessor amount for {participant.stable_id} exceeds observed principal"
-                    )
+            if (
+                _amount_exceeds_snapshot(participant, snapshot)
+                and snapshot.as_of_date == event.effective_date
+            ):
+                raise ValueError(
+                    f"{event.event_id}: predecessor amount for {participant.stable_id} exceeds observed principal on event date"
+                )
             edges.append(
                 DebtLineageEdge(
                     from_node=participant.stable_id,
@@ -554,11 +631,13 @@ def build_debt_lineage_graph(
                 versions_by_id[participant.stable_id], event.effective_date, predecessor=False
             )
             amount = _participant_amount(participant, snapshot)
-            if participant.amount is not None and snapshot.principal is not None:
-                if participant.amount > snapshot.principal + max(1e-9, abs(snapshot.principal) * 1e-9):
-                    raise ValueError(
-                        f"{event.event_id}: successor amount for {participant.stable_id} exceeds observed principal"
-                    )
+            if (
+                _amount_exceeds_snapshot(participant, snapshot)
+                and snapshot.as_of_date == event.effective_date
+            ):
+                raise ValueError(
+                    f"{event.event_id}: successor amount for {participant.stable_id} exceeds observed principal on event date"
+                )
             edges.append(
                 DebtLineageEdge(
                     from_node=f"EVENT:{event.event_id}",
@@ -577,15 +656,20 @@ def build_debt_lineage_graph(
             warnings.extend(f"{event.event_id}: {item}" for item in impact.unresolved)
 
     verified_events = [event for event in events_tuple if event.status == "verified"]
-    appeared_as_successor = {
-        participant.stable_id for event in verified_events for participant in event.successors
+    lineage_instruments = {
+        participant.stable_id
+        for event in verified_events
+        for participant in (*event.predecessors, *event.successors)
     }
-    appeared_as_predecessor = {
-        participant.stable_id for event in verified_events for participant in event.predecessors
-    }
-    lineage_instruments = appeared_as_successor | appeared_as_predecessor
-    roots = sorted(lineage_instruments - appeared_as_successor)
-    terminals = sorted(lineage_instruments - appeared_as_predecessor)
+    incoming: set[str] = set()
+    outgoing: set[str] = set()
+    for event in verified_events:
+        predecessor_ids = {item.stable_id for item in event.predecessors}
+        successor_ids = {item.stable_id for item in event.successors}
+        incoming.update(successor_ids - predecessor_ids)
+        outgoing.update(predecessor_ids - successor_ids)
+    roots = sorted(lineage_instruments - incoming)
+    terminals = sorted(lineage_instruments - outgoing)
 
     return DebtLineageGraph(
         events=events_tuple,
@@ -664,7 +748,8 @@ def validate_debt_lineage_events_against_source_packet(
 
     if not errors:
         try:
-            build_debt_lineage_graph(ledger, events)
+            graph = build_debt_lineage_graph(ledger, events)
+            warnings.extend(graph.warnings)
         except ValueError as exc:
             errors.append(str(exc))
 
@@ -696,6 +781,7 @@ def debt_lineage_graph_to_dict(graph: DebtLineageGraph) -> dict[str, Any]:
         "candidate_events_are_confirmed": False,
         "accounting_treatment_is_auto_inferred": False,
         "participant_amount_meaning": "principal participating in the event, not necessarily full instrument outstanding",
+        "snapshot_principal_is_event_ceiling_only_on_same_date": True,
     }
     return payload
 
@@ -735,6 +821,8 @@ def debt_lineage_event_template(ledger: DebtInstrumentLedger) -> dict[str, Any]:
         "guardrails": [
             "Do not merge old and new CUSIPs merely to force continuity; represent an exchange as an explicit event between distinct stable IDs.",
             "Use participant amount for the principal actually tendered/exchanged/redeemed when an event is partial.",
+            "For exchange/refinancing/conversion, leave unchanged residual debt outside the event instead of repeating the same stable ID on both sides.",
+            "A snapshot observed on another date is context, not a hard ceiling on source-backed event principal; date mismatch remains unresolved.",
             "Do not classify modification versus extinguishment from labels alone; accounting treatment requires explicit source-backed basis.",
             "Candidate events are research leads only and must not be treated as confirmed lineage.",
         ],
