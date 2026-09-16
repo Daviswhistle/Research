@@ -126,6 +126,31 @@ def test_workspace_refuses_bond_market_without_verified_debt_input(tmp_path):
         raise AssertionError("expected bond market without debt identity to fail")
 
 
+def test_workspace_refuses_bond_market_without_frozen_debt_source_packet(tmp_path):
+    workspace = tmp_path / "workspace"; workspace.mkdir()
+    raw_packet = packet()
+    raw_packet["debt_instrument_source_packet"] = None
+    write_json(workspace / "research_packet.json", raw_packet)
+    debt_path = tmp_path / "debt.json"; write_json(debt_path, debt_payload())
+    bond_csv = tmp_path / "bond.csv"
+    bond_csv.write_text(
+        "date,cusip,price_pct_par,yield_pct,benchmark_yield_pct\n"
+        "2022-12-29,111111AA1,55,18,4\n",
+        encoding="utf-8",
+    )
+
+    try:
+        main(base_args(workspace, debt_path) + [
+            "--bond-market-provider", "csv",
+            "--bond-observations-csv", str(bond_csv),
+        ])
+    except ValueError as exc:
+        assert "frozen debt_instrument_source_packet" in str(exc)
+        assert "source-verified" in str(exc)
+    else:
+        raise AssertionError("expected workspace bond market without frozen debt evidence to fail")
+
+
 def test_rebuilding_debt_ledger_without_bond_provider_removes_stale_bond_market(tmp_path):
     workspace = tmp_path / "workspace"; workspace.mkdir()
     write_json(workspace / "research_packet.json", packet())
