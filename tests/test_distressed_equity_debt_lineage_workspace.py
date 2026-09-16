@@ -106,6 +106,32 @@ def test_research_workspace_requires_verification_before_confirming_lineage(tmp_
     assert lineage["terminal_instruments"] == ["CUSIP:111111AA1", "CUSIP:222222BB2"]
 
 
+def test_in_place_approved_verification_survives_rebuild(tmp_path):
+    workspace = tmp_path / "workspace"; workspace.mkdir()
+    write_json(workspace / "research_packet.json", workspace_packet())
+    instruments_path = tmp_path / "instruments.json"; write_json(instruments_path, instruments_payload())
+    events_path = tmp_path / "events.json"; write_json(events_path, events_payload())
+    args = base_args(workspace, instruments_path) + ["--debt-lineage", str(events_path)]
+
+    assert main(args) == 0
+    approval_path = workspace / "debt_lineage_verification_template.json"
+    approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    approval["event_reviews"][0].update({
+        "status": "verified",
+        "verifier": "in-place-reviewer",
+        "verified_on": "2026-09-16",
+        "evidence_reopened": True,
+    })
+    write_json(approval_path, approval)
+
+    assert main(args + ["--debt-lineage-verification", str(approval_path)]) == 0
+    persisted = json.loads(approval_path.read_text(encoding="utf-8"))
+    assert persisted["event_reviews"][0]["status"] == "verified"
+    lineage = json.loads((workspace / "debt_lineage.json").read_text(encoding="utf-8"))
+    assert lineage["events"][0]["status"] == "verified"
+    assert lineage["events"][0]["verified_by"] == "in-place-reviewer"
+
+
 def test_rebuilding_ledger_without_lineage_removes_stale_lineage_artifacts(tmp_path):
     workspace = tmp_path / "workspace"; workspace.mkdir()
     write_json(workspace / "research_packet.json", workspace_packet())
@@ -118,6 +144,28 @@ def test_rebuilding_ledger_without_lineage_removes_stale_lineage_artifacts(tmp_p
     assert not (workspace / "debt_lineage_verification_template.json").exists()
     assert (workspace / "debt_instrument_ledger.json").exists()
     assert (workspace / "debt_lineage_template.json").exists()
+
+
+def test_failed_replacement_lineage_does_not_leave_old_derived_artifacts(tmp_path):
+    workspace = tmp_path / "workspace"; workspace.mkdir()
+    write_json(workspace / "research_packet.json", workspace_packet())
+    instruments_path = tmp_path / "instruments.json"; write_json(instruments_path, instruments_payload())
+    write_json(workspace / "debt_lineage.json", {"stale": True})
+    write_json(workspace / "debt_lineage_verification_template.json", {"stale": True})
+
+    invalid = events_payload()
+    invalid["events"][0]["source_refs"] = ["missing-span"]
+    events_path = tmp_path / "invalid-events.json"; write_json(events_path, invalid)
+    try:
+        main(base_args(workspace, instruments_path) + ["--debt-lineage", str(events_path)])
+    except ValueError as exc:
+        assert "unknown source_refs" in str(exc)
+    else:
+        raise AssertionError("expected invalid replacement lineage to fail")
+
+    assert (workspace / "debt_instrument_ledger.json").exists()
+    assert not (workspace / "debt_lineage.json").exists()
+    assert not (workspace / "debt_lineage_verification_template.json").exists()
 
 
 def test_unverified_snapshot_candidate_is_rejected_by_workspace(tmp_path):
