@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from .alpha_vantage import AlphaVantageProvider
+from .bond_market import build_bond_market_packet, bond_market_packet_to_dict
+from .csv_bond_market import CsvBondMarketProvider
 from .debt_instruments import build_debt_instrument_ledger, debt_instrument_ledger_to_dict, debt_snapshots_from_dict
 from .debt_lineage import (
     build_debt_lineage_graph,
@@ -18,6 +20,7 @@ from .debt_lineage import (
     promote_verified_debt_lineage_events,
     validate_debt_lineage_events_against_source_packet,
 )
+from .eodhd_bonds import EodhdBondProvider
 from .instrument_verification import validate_debt_snapshots_against_source_packet
 from .orchestration import ResearchBundle, build_research_bundle, ingest_research_bundle, render_research_summary
 from .sec import SecClient, normalize_cik
@@ -48,6 +51,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--market-provider", choices=("none", "alpha-vantage"), default="none")
     parser.add_argument("--alpha-vantage-key", help="Defaults to ALPHA_VANTAGE_API_KEY")
     parser.add_argument("--history-years", type=int, default=5)
+    parser.add_argument(
+        "--bond-market-provider",
+        choices=("none", "csv", "eodhd"),
+        default="none",
+        help="Historical corporate-bond provider; requires --debt-instruments",
+    )
+    parser.add_argument("--bond-observations-csv", help="Normalized CUSIP/ISIN bond history for --bond-market-provider csv")
+    parser.add_argument("--eodhd-key", help="Defaults to EODHD_API_KEY")
+    parser.add_argument("--bond-lookback-days", type=int, default=365)
+    parser.add_argument("--bond-max-staleness-days", type=int, default=30)
+    parser.add_argument("--bond-probability-horizon-years", type=float, default=1.0)
+    parser.add_argument(
+        "--bond-recovery-rates",
+        default="0.20,0.40,0.60",
+        help="Comma-separated recovery assumptions for spread-implied risk-neutral stress proxies",
+    )
     parser.add_argument("--refresh", action="store_true", help="Rebuild the point-in-time packet even when research_packet.json already exists")
     parser.add_argument("--result", action="append", default=[], help="Structured agent-result JSON; repeat to ingest multiple results")
     parser.add_argument("--debt-instruments", help="Optional JSON containing verified filing-level debt instrument snapshots for stable-ID matching")
@@ -81,6 +100,23 @@ def _load_json_any(path: str | Path) -> dict[str, Any] | list[dict[str, Any]]:
 
 def _same_path(left: str | Path, right: str | Path) -> bool:
     return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+
+
+def _recovery_rates(raw: str) -> tuple[float, ...]:
+    values = tuple(float(item.strip()) for item in raw.split(",") if item.strip())
+    if not values:
+        raise ValueError("--bond-recovery-rates must contain at least one value")
+    return values
+
+
+def _bond_market_provider(args: argparse.Namespace):
+    if args.bond_market_provider == "none":
+        return None
+    if args.bond_market_provider == "csv":
+        if not args.bond_observations_csv:
+            raise ValueError("--bond-market-provider csv requires --bond-observations-csv")
+        return CsvBondMarketProvider(args.bond_observations_csv)
+    return EodhdBondProvider(api_key=args.eodhd_key or os.getenv("EODHD_API_KEY"))
 
 
 def _bundle_from_frozen_packet(packet: dict[str, Any], cutoff: date, *, requested_ticker: str | None = None, requested_cik: str | None = None) -> ResearchBundle:
@@ -139,6 +175,12 @@ def _clear_stale_lineage_artifacts(workspace: Path) -> None:
             path.unlink()
 
 
+def _clear_stale_bond_market_artifact(workspace: Path) -> None:
+    path = workspace / "bond_market.json"
+    if path.exists():
+        path.unlink()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cutoff = date.fromisoformat(args.analysis_date)
@@ -148,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.debt_lineage_verification and not args.debt_lineage:
         raise ValueError("--debt-lineage-verification requires --debt-lineage")
+    if args.bond_market_provider != "none" and not args.debt_instruments:
+        raise ValueError("--bond-market-provider requires --debt-instruments so market data binds only to verified stable debt IDs")
     # Load an in-place approval before any stale derived artifacts are invalidated.
     lineage_verification_input = _load_json(args.debt_lineage_verification) if args.debt_lineage_verification else None
 
@@ -185,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     debt_ledger = None
     debt_ledger_payload = None
     debt_lineage_payload = None
+    bond_market_payload = None
     debt_source_validation_warnings: tuple[str, ...] = ()
     debt_lineage_validation_warnings: tuple[str, ...] = ()
     if args.debt_instruments:
@@ -202,9 +247,24 @@ def main(argv: list[str] | None = None) -> int:
         debt_ledger_payload = debt_instrument_ledger_to_dict(debt_ledger)
         _write_json(workspace / "debt_instrument_ledger.json", debt_ledger_payload)
         _write_json(workspace / "debt_lineage_template.json", debt_lineage_event_template(debt_ledger))
-        # The ledger is the identity basis for every derived lineage artifact. Once
-        # it changes, old lineage must disappear even if the replacement later fails.
+        # The ledger is the identity basis for every derived lineage/market artifact.
+        # Once it changes, old derived outputs must disappear even if a replacement fails.
         _clear_stale_lineage_artifacts(workspace)
+        _clear_stale_bond_market_artifact(workspace)
+
+        provider = _bond_market_provider(args)
+        if provider is not None:
+            bond_packet = build_bond_market_packet(
+                provider,
+                debt_ledger,
+                cutoff,
+                lookback_days=args.bond_lookback_days,
+                max_staleness_days=args.bond_max_staleness_days,
+                recovery_rates=_recovery_rates(args.bond_recovery_rates),
+                probability_horizon_years=args.bond_probability_horizon_years,
+            )
+            bond_market_payload = bond_market_packet_to_dict(bond_packet)
+            _write_json(workspace / "bond_market.json", bond_market_payload)
 
     if args.debt_lineage:
         if debt_ledger is None:
@@ -251,6 +311,8 @@ def main(argv: list[str] | None = None) -> int:
         merged = ingest_research_bundle(bundle, raw_results, allow_overwrite=args.allow_overwrite, apply_low_confidence=args.apply_low_confidence)
         if debt_ledger_payload is not None:
             merged["debt_instrument_ledger"] = debt_ledger_payload
+        if bond_market_payload is not None:
+            merged["bond_market"] = bond_market_payload
         if debt_lineage_payload is not None:
             merged["debt_lineage"] = debt_lineage_payload
         _write_json(workspace / "merged.json", merged)
@@ -266,6 +328,25 @@ def main(argv: list[str] | None = None) -> int:
         )
         if debt_source_validation_warnings:
             summary += "- Source validation warnings: " + "; ".join(debt_source_validation_warnings) + "\n"
+    if bond_market_payload is not None:
+        assessments = bond_market_payload["assessments"]
+        observed = [item for item in assessments if item.get("observation") is not None]
+        spread_known = [item for item in observed if item.get("spread_bps") is not None]
+        low_price = [
+            item for item in observed
+            if item.get("observation", {}).get("price_pct_par") is not None
+            and item["observation"]["price_pct_par"] < 80
+        ]
+        summary += (
+            "\n## Historical bond market stress\n\n"
+            f"- Provider: {bond_market_payload['provider']}\n"
+            f"- Stable debt instruments assessed: {len(assessments)}\n"
+            f"- Instruments with cutoff/lookback market observations: {len(observed)}\n"
+            f"- Instruments below 80% of par: {len(low_price)}\n"
+            f"- Instruments with benchmarked credit spread: {len(spread_known)}\n"
+            "- Probability fields are recovery-sensitive, constant-hazard risk-neutral stress proxies; they are not physical default forecasts.\n"
+            "- Artifact: bond_market.json\n"
+        )
     if debt_lineage_payload is not None:
         events = debt_lineage_payload["events"]
         impacts = debt_lineage_payload["impacts"]
