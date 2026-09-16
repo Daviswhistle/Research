@@ -25,6 +25,11 @@ from .market_outcomes import (
     label_market_outcome_cohort,
     market_outcome_cohort_to_dict,
 )
+from .rate_diagnostic_outputs import (
+    feature_strata_rate_diagnostics,
+    market_rate_diagnostics,
+    source_rate_diagnostics,
+)
 from .replay import DistressScanConfig, run_historical_replay
 from .source_outcomes import (
     CsvSourceBackedOutcomeIndex,
@@ -103,6 +108,15 @@ def build_parser() -> argparse.ArgumentParser:
             "net_leverage,impairment_type"
         ),
     )
+    parser.add_argument(
+        "--rate-small-sample-n",
+        type=int,
+        default=30,
+        help=(
+            "Resolved-denominator threshold below which empirical binomial rate diagnostics carry a small-sample warning; "
+            "Wilson 95%% intervals are reported regardless"
+        ),
+    )
     parser.add_argument("--output", "-o", help="JSON output; stdout when omitted")
     parser.add_argument("--markdown-output", help="Optional human-readable cohort summary")
     return parser
@@ -129,6 +143,8 @@ def _markdown(
     base_rates: MarketOutcomeBaseRateComparison | None = None,
     source_base_rates: SourceOutcomeBaseRateComparison | None = None,
     feature_strata: FeatureStrataComparison | None = None,
+    *,
+    rate_small_sample_n: int = 30,
 ) -> str:
     lines = [
         f"# Joint equity / credit distress replay — {run.analysis_date.isoformat()}",
@@ -253,6 +269,16 @@ def _markdown(
             "> Feature buckets are descriptive strata, not universal causal thresholds. Only verified T0 values with evidence_known_date on or before the analysis date are admitted; unknown features remain explicit unknown buckets.",
             "",
         ])
+
+    if base_rates is not None or source_base_rates is not None or feature_strata is not None:
+        lines.extend([
+            "## Rate uncertainty",
+            "",
+            "- JSON output includes Wilson 95% intervals for every empirical binomial rate.",
+            f"- Any resolved denominator below **{rate_small_sample_n}** is flagged `small_sample=true`.",
+            "- Point estimates from thin strata should not be treated as precise probabilities; no LLM-based probability adjustment is applied.",
+            "",
+        ])
     return "\n".join(lines)
 
 
@@ -264,6 +290,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--survival-features-csv requires --source-outcomes-csv for source-backed outcome strata")
     if args.survival_features_csv and not args.outcome_cutoff:
         raise ValueError("--survival-features-csv requires --outcome-cutoff as the outcome knowledge boundary")
+    if args.rate_small_sample_n <= 0:
+        raise ValueError("--rate-small-sample-n must be positive")
 
     cutoff = date.fromisoformat(args.analysis_date)
     equity_provider = CsvMarketProvider(args.securities_csv, args.prices_csv)
@@ -299,6 +327,7 @@ def main(argv: list[str] | None = None) -> int:
     feature_strata = None
     source_index = None
     payload = joint_replay_to_dict(joint)
+    diagnostics: dict[str, object] = {}
     outcome_cutoff = None
     if args.outcome_cutoff:
         outcome_cutoff = date.fromisoformat(args.outcome_cutoff)
@@ -311,12 +340,20 @@ def main(argv: list[str] | None = None) -> int:
         base_rates = compare_market_outcome_base_rates(joint, outcomes)
         payload["market_outcomes"] = market_outcome_cohort_to_dict(outcomes)
         payload["market_base_rates"] = market_outcome_base_rate_to_dict(base_rates)
+        diagnostics["market_base_rates"] = market_rate_diagnostics(
+            base_rates,
+            small_sample_n=args.rate_small_sample_n,
+        )
 
     if args.source_outcomes_csv:
         assert outcome_cutoff is not None
         source_index = CsvSourceBackedOutcomeIndex(args.source_outcomes_csv)
         source_base_rates = compare_source_outcome_base_rates(joint, source_index, outcome_cutoff)
         payload["source_outcome_base_rates"] = source_outcome_base_rate_to_dict(source_base_rates)
+        diagnostics["source_outcome_base_rates"] = source_rate_diagnostics(
+            source_base_rates,
+            small_sample_n=args.rate_small_sample_n,
+        )
 
     if args.survival_features_csv:
         assert outcome_cutoff is not None and source_index is not None
@@ -329,6 +366,13 @@ def main(argv: list[str] | None = None) -> int:
             dimensions=_feature_dimensions(args.feature_strata_dimensions),
         )
         payload["feature_strata_base_rates"] = feature_strata_to_dict(feature_strata)
+        diagnostics["feature_strata_base_rates"] = feature_strata_rate_diagnostics(
+            feature_strata,
+            small_sample_n=args.rate_small_sample_n,
+        )
+
+    if diagnostics:
+        payload["rate_diagnostics"] = diagnostics
 
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
@@ -341,7 +385,14 @@ def main(argv: list[str] | None = None) -> int:
         target = Path(args.markdown_output)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
-            _markdown(joint, outcomes, base_rates, source_base_rates, feature_strata),
+            _markdown(
+                joint,
+                outcomes,
+                base_rates,
+                source_base_rates,
+                feature_strata,
+                rate_small_sample_n=args.rate_small_sample_n,
+            ),
             encoding="utf-8",
         )
     return 0
