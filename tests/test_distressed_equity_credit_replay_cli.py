@@ -6,7 +6,7 @@ from pathlib import Path
 from distressed_equity.credit_replay_cli import main
 
 
-def test_credit_replay_cli_runs_point_in_time_equity_and_credit_pipeline(tmp_path: Path):
+def test_credit_replay_cli_runs_point_in_time_equity_credit_and_market_outcomes(tmp_path: Path):
     securities = tmp_path / "securities.csv"
     prices = tmp_path / "prices.csv"
     links = tmp_path / "credit_links.csv"
@@ -23,7 +23,10 @@ def test_credit_replay_cli_runs_point_in_time_equity_and_credit_pipeline(tmp_pat
         "security_id,symbol,date,close,adjusted_close\n"
         "sec-1,TEST,2019-01-02,10,10\n"
         "sec-1,TEST,2021-12-31,25,25\n"
-        "sec-1,TEST,2022-12-31,5,5\n",
+        "sec-1,TEST,2022-12-31,5,5\n"
+        "sec-1,TEST,2023-12-31,10,10\n"
+        "sec-1,TEST,2024-06-30,20,20\n"
+        "sec-1,TEST,2025-12-31,15,15\n",
         encoding="utf-8",
     )
     links.write_text(
@@ -43,6 +46,7 @@ def test_credit_replay_cli_runs_point_in_time_equity_and_credit_pipeline(tmp_pat
         "--prices-csv", str(prices),
         "--credit-links-csv", str(links),
         "--bond-observations-csv", str(bonds),
+        "--outcome-cutoff", "2026-01-31",
         "--output", str(output),
         "--markdown-output", str(markdown),
     ]) == 0
@@ -61,8 +65,22 @@ def test_credit_replay_cli_runs_point_in_time_equity_and_credit_pipeline(tmp_pat
     assert candidate["max_fresh_spread_bps"] == 1600.0
     assert candidate["any_credit_stress"] is True
 
+    outcomes = payload["market_outcomes"]
+    assert outcomes["outcome_cutoff"] == "2026-01-31"
+    assert outcomes["case_count"] == 1
+    assert outcomes["active_12m_count"] == 1
+    assert outcomes["active_3y_count"] == 1
+    outcome = outcomes["outcomes"][0]
+    assert outcome["adjusted_price_multiple_12m"] == 2.0
+    assert outcome["adjusted_price_multiple_3y"] == 3.0
+    assert outcome["max_adjusted_price_multiple_within_3y"] == 4.0
+
     summary = markdown.read_text(encoding="utf-8")
     assert "Joint equity / credit distress replay" in summary
+    assert "Market-observable outcomes" in summary
     assert "TEST" in summary
     assert "55.0" in summary
     assert "1600 bps" in summary
+    assert "3.00x" in summary
+    assert "4.00x" in summary
+    assert "not labels for corporate survival" in summary
