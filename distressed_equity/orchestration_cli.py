@@ -26,6 +26,16 @@ from .orchestration import ResearchBundle, build_research_bundle, ingest_researc
 from .sec import SecClient, normalize_cik
 
 
+_DEBT_DERIVED_ARTIFACTS = (
+    "debt_instrument_ledger.json",
+    "debt_lineage_template.json",
+    "debt_lineage.json",
+    "debt_lineage_verification_template.json",
+    "bond_market.json",
+    "merged.json",
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build/resume a point-in-time distressed-equity research workspace")
     identity = parser.add_mutually_exclusive_group(required=True)
@@ -174,6 +184,13 @@ def _write_bundle_artifacts(workspace: Path, bundle: ResearchBundle) -> None:
         _write_json(workspace / "market_snapshot.json", packet["market_snapshot"])
 
 
+def _clear_debt_derived_artifacts(workspace: Path) -> None:
+    for name in _DEBT_DERIVED_ARTIFACTS:
+        path = workspace / name
+        if path.exists():
+            path.unlink()
+
+
 def _clear_stale_lineage_artifacts(workspace: Path) -> None:
     for name in ("debt_lineage.json", "debt_lineage_verification_template.json"):
         path = workspace / name
@@ -199,7 +216,6 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--debt-lineage-verification requires --debt-lineage")
     if args.bond_market_provider != "none" and not args.debt_instruments:
         raise ValueError("--bond-market-provider requires --debt-instruments so market data binds only to verified stable debt IDs")
-    # Load an in-place approval before any stale derived artifacts are invalidated.
     lineage_verification_input = _load_json(args.debt_lineage_verification) if args.debt_lineage_verification else None
 
     if packet_path.exists() and not args.refresh:
@@ -231,6 +247,12 @@ def main(argv: list[str] | None = None) -> int:
             market_provider=market_provider,
             history_years=args.history_years,
         )
+        # `bundle` is fully built in memory. Only now invalidate artifacts bound
+        # to the previous frozen debt evidence, immediately before publishing the
+        # refreshed packet. A failed refresh therefore leaves the old workspace
+        # intact; a successful packet publish can never sit beside stale debt output.
+        if args.refresh:
+            _clear_debt_derived_artifacts(workspace)
         _write_bundle_artifacts(workspace, bundle)
 
     debt_ledger = None
@@ -258,8 +280,6 @@ def main(argv: list[str] | None = None) -> int:
         debt_ledger_payload = debt_instrument_ledger_to_dict(debt_ledger)
         _write_json(workspace / "debt_instrument_ledger.json", debt_ledger_payload)
         _write_json(workspace / "debt_lineage_template.json", debt_lineage_event_template(debt_ledger))
-        # The ledger is the identity basis for every derived lineage/market artifact.
-        # Once it changes, old derived outputs must disappear even if a replacement fails.
         _clear_stale_lineage_artifacts(workspace)
         _clear_stale_bond_market_artifact(workspace)
 
@@ -313,8 +333,6 @@ def main(argv: list[str] | None = None) -> int:
         debt_lineage_payload = debt_lineage_graph_to_dict(lineage)
         _write_json(workspace / "debt_lineage.json", debt_lineage_payload)
         if verification_is_in_place:
-            # Restore the already-loaded approved artifact only after successful
-            # validation/promotion so a failed rebuild cannot leave stale approval.
             _write_json(verification_path, lineage_verification_input)
 
     merged = None
