@@ -14,6 +14,11 @@ from .credit_replay import (
 )
 from .csv_bond_market import CsvBondMarketProvider
 from .csv_market import CsvMarketProvider
+from .market_base_rates import (
+    MarketOutcomeBaseRateComparison,
+    compare_market_outcome_base_rates,
+    market_outcome_base_rate_to_dict,
+)
 from .market_outcomes import (
     MarketOutcomeCohort,
     MarketOutcomeConfig,
@@ -46,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--outcome-cutoff",
         help=(
             "Optional YYYY-MM-DD date through which later market data may be used to label market-observable "
-            "+12m/+3y outcomes. Omit to keep candidate replay strictly cutoff-only."
+            "+12m/+3y outcomes and market-only base-rate comparisons. Omit to keep candidate replay strictly cutoff-only."
         ),
     )
     parser.add_argument(
@@ -60,7 +65,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _markdown(run: JointReplayRun, outcomes: MarketOutcomeCohort | None = None) -> str:
+def _pct(value: float | None) -> str:
+    return "—" if value is None else f"{value:.1%}"
+
+
+def _mult(value: float | None) -> str:
+    return "—" if value is None else f"{value:.2f}x"
+
+
+def _markdown(
+    run: JointReplayRun,
+    outcomes: MarketOutcomeCohort | None = None,
+    base_rates: MarketOutcomeBaseRateComparison | None = None,
+) -> str:
     lines = [
         f"# Joint equity / credit distress replay — {run.analysis_date.isoformat()}",
         "",
@@ -106,19 +123,35 @@ def _markdown(run: JointReplayRun, outcomes: MarketOutcomeCohort | None = None) 
             "|---|---|---:|---|---:|---:|",
         ])
         for outcome in outcomes.outcomes:
-            m12 = "—" if outcome.adjusted_price_multiple_12m is None else f"{outcome.adjusted_price_multiple_12m:.2f}x"
-            m3 = "—" if outcome.adjusted_price_multiple_3y is None else f"{outcome.adjusted_price_multiple_3y:.2f}x"
-            max3 = (
-                "—"
-                if outcome.max_adjusted_price_multiple_within_3y is None
-                else f"{outcome.max_adjusted_price_multiple_within_3y:.2f}x"
-            )
+            m12 = _mult(outcome.adjusted_price_multiple_12m)
+            m3 = _mult(outcome.adjusted_price_multiple_3y)
+            max3 = _mult(outcome.max_adjusted_price_multiple_within_3y)
             a12 = "unknown" if outcome.same_security_active_12m is None else ("yes" if outcome.same_security_active_12m else "no")
             a3 = "unknown" if outcome.same_security_active_3y is None else ("yes" if outcome.same_security_active_3y else "no")
             lines.append(f"| {outcome.symbol_at_distress} | {a12} | {m12} | {a3} | {m3} | {max3} |")
         lines.extend([
             "",
             "> Same-security membership and adjusted-price multiples are market-observable facts only. They are not labels for corporate survival, bankruptcy avoidance, reorganization success, or legal survival of the pre-distress common stock.",
+            "",
+        ])
+
+    if base_rates is not None:
+        lines.extend([
+            "## Market-observable base-rate comparison",
+            "",
+            "| Credit evidence group | Cases | Same security active +12m | Same security active +3y | 3x at +3y endpoint | 3x observed within 3y | Median +3y endpoint | Median max ≤3y |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
+        ])
+        for group in base_rates.groups:
+            lines.append(
+                f"| {group.group} | {group.case_count} | {_pct(group.same_security_active_12m_rate)} | "
+                f"{_pct(group.same_security_active_3y_rate)} | {_pct(group.three_x_3y_endpoint_rate)} | "
+                f"{_pct(group.three_x_observed_within_3y_rate)} | {_mult(group.median_3y_endpoint_multiple)} | "
+                f"{_mult(group.median_max_observed_multiple_within_3y)} |"
+            )
+        lines.extend([
+            "",
+            "> These are market-observable conditional rates, not bankruptcy/common-survival rates. `no_fresh_credit` is a coverage/liquidity group, not evidence of credit health.",
             "",
         ])
     return "\n".join(lines)
@@ -155,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     outcomes = None
+    base_rates = None
     payload = joint_replay_to_dict(joint)
     if args.outcome_cutoff:
         outcome_cutoff = date.fromisoformat(args.outcome_cutoff)
@@ -164,7 +198,9 @@ def main(argv: list[str] | None = None) -> int:
             outcome_cutoff,
             config=MarketOutcomeConfig(horizon_grace_days=args.outcome_horizon_grace_days),
         )
+        base_rates = compare_market_outcome_base_rates(joint, outcomes)
         payload["market_outcomes"] = market_outcome_cohort_to_dict(outcomes)
+        payload["market_base_rates"] = market_outcome_base_rate_to_dict(base_rates)
 
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
@@ -176,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.markdown_output:
         target = Path(args.markdown_output)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(_markdown(joint, outcomes), encoding="utf-8")
+        target.write_text(_markdown(joint, outcomes, base_rates), encoding="utf-8")
     return 0
 
 
