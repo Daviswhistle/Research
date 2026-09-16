@@ -26,6 +26,12 @@ from .market_outcomes import (
     market_outcome_cohort_to_dict,
 )
 from .replay import DistressScanConfig, run_historical_replay
+from .source_outcomes import (
+    CsvSourceBackedOutcomeIndex,
+    SourceOutcomeBaseRateComparison,
+    compare_source_outcome_base_rates,
+    source_outcome_base_rate_to_dict,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -50,8 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--outcome-cutoff",
         help=(
-            "Optional YYYY-MM-DD date through which later market data may be used to label market-observable "
-            "+12m/+3y outcomes and market-only base-rate comparisons. Omit to keep candidate replay strictly cutoff-only."
+            "Optional YYYY-MM-DD date through which later data may be used for outcome analysis. "
+            "It gates both market-observable +12m/+3y outcomes and any source-backed legal/business labels."
         ),
     )
     parser.add_argument(
@@ -59,6 +65,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=31,
         help="Maximum days after a +12m/+3y target to find the first adjusted price observation",
+    )
+    parser.add_argument(
+        "--source-outcomes-csv",
+        help=(
+            "Optional verified legal/business outcome labels. Requires --outcome-cutoff; labels known after that date "
+            "are excluded by outcome_known_date."
+        ),
     )
     parser.add_argument("--output", "-o", help="JSON output; stdout when omitted")
     parser.add_argument("--markdown-output", help="Optional human-readable cohort summary")
@@ -77,6 +90,7 @@ def _markdown(
     run: JointReplayRun,
     outcomes: MarketOutcomeCohort | None = None,
     base_rates: MarketOutcomeBaseRateComparison | None = None,
+    source_base_rates: SourceOutcomeBaseRateComparison | None = None,
 ) -> str:
     lines = [
         f"# Joint equity / credit distress replay — {run.analysis_date.isoformat()}",
@@ -154,11 +168,38 @@ def _markdown(
             "> These are market-observable conditional rates, not bankruptcy/common-survival rates. `no_fresh_credit` is a coverage/liquidity group, not evidence of credit health.",
             "",
         ])
+
+    if source_base_rates is not None:
+        lines.extend([
+            "## Verified legal / business outcome base rates",
+            "",
+            f"- knowledge cutoff: **{source_base_rates.knowledge_cutoff.isoformat()}**",
+            f"- replay cohort cases: **{source_base_rates.cohort_case_count:,}**",
+            f"- verified source-backed labels known by cutoff: **{source_base_rates.known_source_label_count:,}**",
+            "",
+            "| Credit evidence group | Cohort | Source labels | Company survives 12m | Existing common survives 12m | Normalizes ≤3y | 3x ≤3y | Median 3y multiple |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
+        ])
+        for group in source_base_rates.groups:
+            lines.append(
+                f"| {group.group} | {group.cohort_case_count} | {group.source_labeled_case_count} | "
+                f"{_pct(group.survived_12m_rate)} | {_pct(group.existing_common_survival_rate)} | "
+                f"{_pct(group.normalized_within_3y_rate)} | {_pct(group.three_x_3y_rate)} | "
+                f"{_mult(group.median_equity_multiple_3y)} |"
+            )
+        lines.extend([
+            "",
+            "> Legal/business rates use only rows marked verified with non-empty evidence refs, verifier metadata, reopened evidence, and outcome_known_date at or before the knowledge cutoff. Missing labels stay missing; they are not counted as failures.",
+            "",
+        ])
     return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.source_outcomes_csv and not args.outcome_cutoff:
+        raise ValueError("--source-outcomes-csv requires --outcome-cutoff as the outcome knowledge boundary")
+
     cutoff = date.fromisoformat(args.analysis_date)
     equity_provider = CsvMarketProvider(args.securities_csv, args.prices_csv)
     equity_run = run_historical_replay(
@@ -189,7 +230,9 @@ def main(argv: list[str] | None = None) -> int:
 
     outcomes = None
     base_rates = None
+    source_base_rates = None
     payload = joint_replay_to_dict(joint)
+    outcome_cutoff = None
     if args.outcome_cutoff:
         outcome_cutoff = date.fromisoformat(args.outcome_cutoff)
         outcomes = label_market_outcome_cohort(
@@ -202,6 +245,12 @@ def main(argv: list[str] | None = None) -> int:
         payload["market_outcomes"] = market_outcome_cohort_to_dict(outcomes)
         payload["market_base_rates"] = market_outcome_base_rate_to_dict(base_rates)
 
+    if args.source_outcomes_csv:
+        assert outcome_cutoff is not None
+        source_index = CsvSourceBackedOutcomeIndex(args.source_outcomes_csv)
+        source_base_rates = compare_source_outcome_base_rates(joint, source_index, outcome_cutoff)
+        payload["source_outcome_base_rates"] = source_outcome_base_rate_to_dict(source_base_rates)
+
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
         target = Path(args.output)
@@ -212,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.markdown_output:
         target = Path(args.markdown_output)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(_markdown(joint, outcomes, base_rates), encoding="utf-8")
+        target.write_text(_markdown(joint, outcomes, base_rates, source_base_rates), encoding="utf-8")
     return 0
 
 
