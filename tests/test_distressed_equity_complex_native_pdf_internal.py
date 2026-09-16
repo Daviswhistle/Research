@@ -44,18 +44,35 @@ def _document():
     )
 
 
+def _extract(items):
+    return _complex_extract(native, sec_instruments, _pdf(items), _document(), max_candidates=20)
+
+
+def _debug(result):
+    return [
+        (candidate.cluster_status, candidate.snapshot_template, candidate.source_span_ids)
+        for candidate in result.candidates
+    ]
+
+
 def test_internal_complex_native_pdf_multirow_path_does_not_fall_back():
-    result = _complex_extract(
-        native,
-        sec_instruments,
-        _pdf([
-            (40, 750, "Instrument"), (300, 750, "Principal ($ millions)"),
-            (390, 750, "Maturity"), (500, 750, "CUSIP"),
-            (40, 725, "Term Loan B"), (300, 725, "800"), (500, 725, "111111111"),
-            (390, 700, "2028-12-15"),
-        ]),
-        _document(),
-        max_candidates=20,
-    )
+    result = _extract([
+        (40, 750, "Instrument"), (300, 750, "Principal ($ millions)"),
+        (390, 750, "Maturity"), (500, 750, "CUSIP"),
+        (40, 725, "Term Loan B"), (300, 725, "800"), (500, 725, "111111111"),
+        (390, 700, "2028-12-15"),
+    ])
     groups = [candidate for candidate in result.candidates if candidate.cluster_status == "pdf_layout_row_group"]
-    assert len(groups) == 1
+    assert len(groups) == 1, _debug(result)
+
+
+def test_internal_complex_native_pdf_transposed_path_is_classified_by_column():
+    result = _extract([
+        (40, 750, "Term"), (200, 750, "5.25% Senior Secured Notes due 2028"),
+        (410, 750, "6.00% Senior Notes due 2030"),
+        (40, 725, "Principal ($ millions)"), (200, 725, "500"), (410, 725, "400"),
+        (40, 700, "Maturity"), (200, 700, "2028-06-15"), (410, 700, "2030-06-15"),
+        (40, 675, "Coupon"), (200, 675, "5.25%"), (410, 675, "6.00%"),
+    ])
+    columns = [candidate for candidate in result.candidates if candidate.cluster_status == "pdf_layout_column"]
+    assert len(columns) == 2, _debug(result)
