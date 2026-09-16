@@ -17,8 +17,8 @@ from .survival_features import CsvSurvivalFeatureIndex
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Audit historical distress-population data coverage across replay dates: equity universe, "
-            "point-in-time credit links, fresh credit, verified source outcomes, and verified T0 features"
+            "Audit historical distress-population data coverage across replay dates: market evaluability, "
+            "equity distress, point-in-time credit links, source-outcome maturity/censoring, and T0 features"
         )
     )
     parser.add_argument("--analysis-date", action="append", required=True, help="YYYY-MM-DD; repeat as needed")
@@ -70,43 +70,89 @@ def _markdown(payload: dict[str, object]) -> str:
         f"- unique permanent securities: **{payload['unique_security_count']}**",
         f"- repeated security observations: **{payload['repeated_case_observation_count']}**",
         "",
-        "| Date | Universe | Scanned | Distress | Credit links | Fresh credit | Credit stress | Source labels | T0 features |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "## Market evaluability",
+        "",
+        "| Date | Universe | Scanned | Evaluable | Unevaluable | Evaluable non-candidate | Distress | Distress / evaluable |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         assert isinstance(row, dict)
         lines.append(
             f"| {row['analysis_date']} | {row['historical_universe_size']} | {row['scanned_security_count']} | "
-            f"{row['equity_distress_case_count']} | {row['credit_linked_case_count']} | {row['fresh_credit_case_count']} | "
-            f"{row['credit_stress_case_count']} | {row['source_labeled_case_count']} | {row['t0_feature_snapshot_count']} |"
+            f"{row['evaluable_security_count']} | {row['unevaluable_security_count']} | "
+            f"{row['evaluable_non_candidate_count']} | {row['equity_distress_case_count']} | "
+            f"{_pct(row['distress_rate_of_evaluable'])} |"
         )
+
     lines.extend([
         "",
-        "## Coverage ratios",
+        "### Skip reasons",
         "",
-        "| Date | Link / distress | Fresh / distress | Fresh / linked | Source labels / distress | T0 features / distress |",
-        "|---|---:|---:|---:|---:|---:|",
+        "| Date | Classification | Reason | Count |",
+        "|---|---|---|---:|",
+    ])
+    for row in rows:
+        assert isinstance(row, dict)
+        reasons = row.get("skip_reason_counts")
+        assert isinstance(reasons, list)
+        if not reasons:
+            lines.append(f"| {row['analysis_date']} | — | none | 0 |")
+            continue
+        for reason in reasons:
+            assert isinstance(reason, dict)
+            lines.append(
+                f"| {row['analysis_date']} | {reason['classification']} | {reason['reason']} | {reason['count']} |"
+            )
+
+    lines.extend([
+        "",
+        "## Credit / source / feature coverage",
+        "",
+        "| Date | Credit links | Fresh credit | Credit stress | Source labels | T0 features | Link / distress | Fresh / linked |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ])
     for row in rows:
         assert isinstance(row, dict)
         lines.append(
-            f"| {row['analysis_date']} | {_pct(row['credit_link_coverage_of_distress'])} | "
-            f"{_pct(row['fresh_credit_coverage_of_distress'])} | {_pct(row['fresh_credit_coverage_of_linked'])} | "
-            f"{_pct(row['source_label_coverage_of_distress'])} | {_pct(row['feature_snapshot_coverage_of_distress'])} |"
+            f"| {row['analysis_date']} | {row['credit_linked_case_count']} | {row['fresh_credit_case_count']} | "
+            f"{row['credit_stress_case_count']} | {row['source_labeled_case_count']} | {row['t0_feature_snapshot_count']} | "
+            f"{_pct(row['credit_link_coverage_of_distress'])} | {_pct(row['fresh_credit_coverage_of_linked'])} |"
         )
+
     lines.extend([
         "",
-        "## Outcome / feature detail",
+        "## Outcome maturity / censoring",
         "",
-        "| Date | Survival 12m | Common 12m | Normalized 3y | Equity multiple 3y | Liquidity | Maturity | Covenant | Leverage | Impairment |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Date | Metric | Labeled | Horizon eligible | Early resolved | Right-censored | Missing among eligible | Coverage of eligible |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
+    ])
+    metric_rows = (
+        ("survived_12m", "Survival 12m"),
+        ("existing_common_12m", "Common 12m"),
+        ("normalized_3y", "Normalized 3y"),
+        ("equity_multiple_3y", "Equity multiple 3y"),
+    )
+    for row in rows:
+        assert isinstance(row, dict)
+        for prefix, label in metric_rows:
+            lines.append(
+                f"| {row['analysis_date']} | {label} | {row[prefix + '_labeled_count']} | "
+                f"{row[prefix + '_horizon_eligible_count']} | {row[prefix + '_early_resolved_count']} | "
+                f"{row[prefix + '_right_censored_count']} | {row[prefix + '_missing_among_horizon_eligible_count']} | "
+                f"{_pct(row[prefix + '_label_coverage_of_horizon_eligible'])} |"
+            )
+
+    lines.extend([
+        "",
+        "## T0 feature detail",
+        "",
+        "| Date | Snapshots | Liquidity | Maturity | Covenant | Leverage | Impairment |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ])
     for row in rows:
         assert isinstance(row, dict)
         lines.append(
-            f"| {row['analysis_date']} | {row['survived_12m_labeled_count']} | "
-            f"{row['existing_common_12m_labeled_count']} | {row['normalized_3y_labeled_count']} | "
-            f"{row['equity_multiple_3y_labeled_count']} | {row['liquidity_runway_feature_count']} | "
+            f"| {row['analysis_date']} | {row['t0_feature_snapshot_count']} | {row['liquidity_runway_feature_count']} | "
             f"{row['nearest_maturity_feature_count']} | {row['covenant_headroom_feature_count']} | "
             f"{row['net_leverage_feature_count']} | {row['impairment_type_feature_count']} |"
         )
@@ -116,7 +162,7 @@ def _markdown(payload: dict[str, object]) -> str:
         lines.extend(f"- {item}" for item in warnings)
     lines.extend([
         "",
-        "> This is an ex-post dataset coverage audit, not an investment signal and not an ex-ante prior. Missing links, outcomes, or features remain missing; they are never reclassified as healthy, failed, or otherwise resolved.",
+        "> This is an ex-post dataset coverage audit, not an investment signal and not an ex-ante prior. Unevaluable securities are separated from evaluable non-candidates; outcome labels are measured against horizon-eligible cases, while pre-horizon unresolved cases remain explicitly right-censored.",
         "",
     ])
     return "\n".join(lines)
