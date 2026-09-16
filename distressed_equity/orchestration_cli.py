@@ -235,6 +235,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.debt_instruments:
         raw_debt = _load_json_any(args.debt_instruments)
         source_packet = bundle.packet.get("debt_instrument_source_packet")
+        if args.bond_market_provider != "none" and not isinstance(source_packet, dict):
+            raise ValueError(
+                "workspace bond market requires a frozen debt_instrument_source_packet so stable debt IDs are source-verified"
+            )
         if isinstance(source_packet, dict):
             source_validation = validate_debt_snapshots_against_source_packet(source_packet, raw_debt)
             if not source_validation.valid:
