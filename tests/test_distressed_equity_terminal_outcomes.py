@@ -134,9 +134,17 @@ def test_company_terminal_fact_allows_early_normalized_false(tmp_path: Path):
     assert label.company_terminal_fact is not None
 
 
-def test_early_true_survival_is_still_rejected_even_with_terminal_fact(tmp_path: Path):
+def test_early_true_survival_is_still_rejected_without_terminal_inference(tmp_path: Path):
     path = tmp_path / "outcomes.csv"
-    _write(path, [_base(survived_12m="true")])
+    _write(path, [_base(
+        survived_12m="true",
+        survived_12m_evidence_refs="SEC:SURVIVAL",
+        company_terminal_event_type="",
+        company_terminal_event_date="",
+        company_terminal_event_known_date="",
+        company_terminal_event_evidence_refs="",
+        evidence_refs="SEC:SURVIVAL",
+    )])
     with pytest.raises(ValueError, match="survived_12m cannot be known before its nominal horizon"):
         CsvSourceBackedOutcomeIndex(path)
 
