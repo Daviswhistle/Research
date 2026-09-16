@@ -8,6 +8,7 @@ from pathlib import Path
 from .credit_replay import CreditReplayConfig, CsvCreditIdentityIndex, run_joint_credit_replay
 from .csv_bond_market import CsvBondMarketProvider
 from .csv_market import CsvMarketProvider
+from .experiment_manifest import build_experiment_manifest, experiment_manifest_to_dict
 from .population_coverage import build_population_coverage_report, population_coverage_to_dict
 from .replay import DistressScanConfig, run_historical_replay
 from .source_outcomes import CsvSourceBackedOutcomeIndex
@@ -43,6 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--credit-price-below", type=float, default=80.0)
     parser.add_argument("--credit-yield-at-or-above", type=float, default=15.0)
     parser.add_argument("--credit-spread-at-or-above", type=float, default=1000.0)
+    parser.add_argument(
+        "--code-revision",
+        help="Optional exact code revision for reproducibility; otherwise GITHUB_SHA then local git HEAD are attempted",
+    )
     parser.add_argument("--output", "-o", help="JSON output; stdout when omitted")
     parser.add_argument("--markdown-output", help="Optional human-readable coverage report")
     return parser
@@ -59,12 +64,35 @@ def _pct(value: float | None) -> str:
     return "—" if value is None else f"{value:.1%}"
 
 
+def _manifest_config(args: argparse.Namespace, analysis_dates: tuple[date, ...], coverage_cutoff: date) -> dict[str, object]:
+    return {
+        "analysis_dates": [item.isoformat() for item in analysis_dates],
+        "outcome_coverage_cutoff": coverage_cutoff.isoformat(),
+        "exchanges": sorted(set(args.exchange)),
+        "min_drawdown": args.min_drawdown,
+        "min_price": args.min_price,
+        "lookback_years": args.lookback_years,
+        "max_securities": args.max_securities,
+        "credit_lookback_days": args.credit_lookback_days,
+        "credit_max_staleness_days": args.credit_max_staleness_days,
+        "credit_price_below": args.credit_price_below,
+        "credit_yield_at_or_above": args.credit_yield_at_or_above,
+        "credit_spread_at_or_above": args.credit_spread_at_or_above,
+    }
+
+
 def _markdown(payload: dict[str, object]) -> str:
     rows = payload["rows"]
     assert isinstance(rows, list)
+    manifest = payload.get("experiment_manifest")
+    assert isinstance(manifest, dict)
+    experiment_id = manifest.get("experiment_fingerprint") or "unavailable (code revision unresolved)"
     lines = [
         f"# Historical distress population coverage — through {payload['outcome_coverage_cutoff']}",
         "",
+        f"- experiment fingerprint: **{experiment_id}**",
+        f"- data/config fingerprint: **{manifest['data_config_fingerprint']}**",
+        f"- code revision: **{manifest.get('code_revision') or 'unresolved'}**",
         f"- replay dates: **{', '.join(payload['analysis_dates'])}**",
         f"- distress case observations: **{payload['total_case_observations']}**",
         f"- unique permanent securities: **{payload['unique_security_count']}**",
@@ -157,12 +185,18 @@ def _markdown(payload: dict[str, object]) -> str:
             f"{row['net_leverage_feature_count']} | {row['impairment_type_feature_count']} |"
         )
     warnings = payload.get("warnings")
-    if isinstance(warnings, list) and warnings:
+    manifest_warnings = manifest.get("warnings")
+    combined_warnings = []
+    if isinstance(warnings, list):
+        combined_warnings.extend(warnings)
+    if isinstance(manifest_warnings, list):
+        combined_warnings.extend(manifest_warnings)
+    if combined_warnings:
         lines.extend(["", "## Warnings", ""])
-        lines.extend(f"- {item}" for item in warnings)
+        lines.extend(f"- {item}" for item in combined_warnings)
     lines.extend([
         "",
-        "> This is an ex-post dataset coverage audit, not an investment signal and not an ex-ante prior. Unevaluable securities are separated from evaluable non-candidates; outcome labels are measured against horizon-eligible cases, while pre-horizon unresolved cases remain explicitly right-censored.",
+        "> This is an ex-post dataset coverage audit, not an investment signal and not an ex-ante prior. Unevaluable securities are separated from evaluable non-candidates; outcome labels are measured against horizon-eligible cases, while pre-horizon unresolved cases remain explicitly right-censored. The experiment fingerprint binds input bytes, normalized config, and code revision; file-system paths do not affect experiment identity.",
         "",
     ])
     return "\n".join(lines)
@@ -174,6 +208,20 @@ def main(argv: list[str] | None = None) -> int:
     coverage_cutoff = date.fromisoformat(args.outcome_coverage_cutoff)
     if any(item > coverage_cutoff for item in analysis_dates):
         raise ValueError("all analysis dates must be on or before --outcome-coverage-cutoff")
+
+    manifest = build_experiment_manifest(
+        pipeline="population_coverage",
+        input_files={
+            "securities": args.securities_csv,
+            "prices": args.prices_csv,
+            "credit_links": args.credit_links_csv,
+            "bond_observations": args.bond_observations_csv,
+            "source_outcomes": args.source_outcomes_csv,
+            "survival_features": args.survival_features_csv,
+        },
+        config=_manifest_config(args, analysis_dates, coverage_cutoff),
+        code_revision=args.code_revision,
+    )
 
     equity_provider = CsvMarketProvider(args.securities_csv, args.prices_csv)
     credit_provider = CsvBondMarketProvider(args.bond_observations_csv)
@@ -212,6 +260,7 @@ def main(argv: list[str] | None = None) -> int:
         outcome_coverage_cutoff=coverage_cutoff,
     )
     payload = population_coverage_to_dict(report)
+    payload["experiment_manifest"] = experiment_manifest_to_dict(manifest)
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
         target = Path(args.output)
