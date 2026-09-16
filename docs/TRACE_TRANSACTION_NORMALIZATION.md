@@ -24,7 +24,7 @@ CUSIP가 없는 또는 blank인 historical row도 처리할 수 있지만, 그 �
 
 지원되는 identity source는 두 가지다.
 
-1. FINRA TRACE Corporate/Agency **Daily List security export**의 effective-dated addition/change/deletion 이벤트
+1. FINRA TRACE Corporate/Agency **Daily List security export**의 addition/deletion/change 기록
 2. CUSIP-licensed **Security Master snapshot** + 사용자가 명시한 snapshot `as-of` date
 
 Security Master snapshot은 지정한 as-of 이전으로 절대 backfill하지 않는다. 예를 들어 2026-09-16 snapshot을 2022 transaction에 적용하지 않는다.
@@ -38,7 +38,7 @@ raw FINRA reports
     -> parse + unit/date/time validation
     -> point-in-time security identity
        raw CUSIP if present
-       OR exact TRACE Symbol interval from source-backed FINRA identity events
+       OR exact TRACE Symbol interval from source-backed FINRA identity records
     -> exact semantic duplicate collapse
     -> trade lifecycle resolution
        T/R active
@@ -52,15 +52,41 @@ raw FINRA reports
 
 ## Point-in-time TRACE Symbol → CUSIP identity
 
-### Daily List event history
+### Daily List date semantics
 
-FINRA Daily List security records expose additions, deletions and changes with an **effective date** plus Symbol/CUSIP identity fields. Change records can expose old/new Symbol and old/new CUSIP.
-
-Repository는 이 이벤트에서 non-overlapping identity interval을 만든다.
+FINRA Daily List에서 identity timing에 사용할 수 있는 날짜의 의미는 event 종류마다 다르다.
 
 ```text
-2023-01-01  SA  TEST1 -> 111111AA1
-2023-02-01  SC  TEST1/111111AA1 -> TEST2/222222BB2
+Addition:
+  Trade Report Effective Date
+  = security가 처음 trade reporting 대상이 되는 날짜
+
+Deletion:
+  Effective Date
+  = security deletion의 effective date
+
+Change:
+  Update Date
+  fallback: DL Date
+  = old/new Symbol/CUSIP 변경이 Data Master / Daily List에서 관측된 보수적 availability boundary
+```
+
+Change 행의 `Old Trade Report Effective Date` / `New Trade Report Effective Date`는 **Symbol/CUSIP 변경일이 아니다**. FINRA 문서상 해당 security의 trade-report eligibility 관련 속성이다. 따라서 repository는 그 값을 identity transition date로 사용하지 않는다.
+
+Change에서 `Update Date`가 있으면 그것을 사용하고, 없으면 `DL Date`까지만 fallback한다. 이 날짜는 “그 시점부터 새 mapping을 source에서 관측할 수 있다”는 뜻이며, 더 이른 실제 변경시점을 역추정하지 않는다.
+
+예:
+
+```text
+2023-01-01  Addition
+  Trade Report Effective Date=2023-01-01
+  TEST1 -> 111111AA1
+
+2023-02-01  Change
+  Update Date=2023-02-01
+  Old TEST1 / 111111AA1
+  New TEST2 / 222222BB2
+  New Trade Report Effective Date=2022-01-01   # identity change date로 사용하지 않음
 
 => TEST1 / 111111AA1 : [2023-01-01, 2023-02-01)
 => TEST2 / 222222BB2 : [2023-02-01, ...)
@@ -71,7 +97,10 @@ Repository는 이 이벤트에서 non-overlapping identity interval을 만든다
 보수적 규칙:
 
 - exact Symbol only; issuer/name fuzzy matching 금지
-- effective date 필수; Daily List publication date를 identity effective date로 대체하지 않음
+- Addition은 `Trade Report Effective Date`가 없으면 실패
+- Deletion은 `Effective Date`가 없으면 실패
+- Change는 `Update Date`, 없으면 `DL Date`를 availability boundary로 사용
+- Change의 old/new Trade Report Effective Date를 identity transition date로 쓰지 않음
 - 같은 Symbol/date에 서로 다른 CUSIP start가 있으면 hard fail
 - active mapping과 delete/change old-CUSIP가 충돌하면 hard fail
 - CUSIP가 blank인 unlicensed Daily List row는 새 identity를 증명하지 못함
@@ -326,7 +355,9 @@ unresolved_correction_count
 warnings
 ```
 
-따라서 "왜 이 날 가격이 이 값이 됐는가"를 daily row만 보고 끝내지 않고 원본 report stream, identity source, effective-date boundary, aggregation policy까지 역추적할 수 있다.
+또한 interval의 source reference에는 어떤 date basis (`trade_report_effective_date`, `deletion_effective_date`, `update_date`, `daily_list_date_availability_fallback`, `security_master_as_of`)가 쓰였는지가 보존된다.
+
+따라서 "왜 이 날 가격이 이 값이 됐는가"를 daily row만 보고 끝내지 않고 원본 report stream, identity source, 날짜 경계, aggregation policy까지 역추적할 수 있다.
 
 ## 보수적 경계
 
@@ -335,6 +366,7 @@ warnings
 - TRACE Symbol → issuer/debt instrument fuzzy identity
 - Daily List / Security Master coverage 이전 기간의 Symbol→CUSIP backfill
 - CUSIP-unlicensed reference export의 missing CUSIP 보정
+- Change의 실제 identity-effective date가 Update/DL Date보다 이전이었다는 가정
 - unresolved reversal의 target 추정
 - bid/ask 또는 evaluated price
 - W report를 individual execution으로 복원
