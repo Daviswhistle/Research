@@ -68,6 +68,7 @@ def test_credit_replay_cli_runs_full_point_in_time_outcome_and_feature_pipeline(
         "--source-outcomes-csv", str(source_outcomes),
         "--survival-features-csv", str(survival_features),
         "--feature-strata-dimensions", "liquidity_runway,nearest_maturity,covenant_headroom,net_leverage,impairment_type",
+        "--rate-small-sample-n", "30",
         "--output", str(output),
         "--markdown-output", str(markdown),
     ]) == 0
@@ -139,12 +140,40 @@ def test_credit_replay_cli_runs_full_point_in_time_outcome_and_feature_pipeline(
     impairment = strata[("impairment_type", "temporary", "fresh_credit_stress")]
     assert impairment["median_equity_multiple_3y"] == 3.0
 
+    diagnostics = payload["rate_diagnostics"]
+    market_diag = {group["group"]: group for group in diagnostics["market_base_rates"]["groups"]}
+    market_active = market_diag["fresh_credit_stress"]["same_security_active_12m"]
+    assert market_active["resolved_n"] == 1
+    assert market_active["successes"] == 1
+    assert market_active["rate"] == 1.0
+    assert market_active["small_sample"] is True
+    assert 0.20 < market_active["wilson_95_low"] < 0.21
+    assert market_active["wilson_95_high"] == 1.0
+
+    source_diag = {group["group"]: group for group in diagnostics["source_outcome_base_rates"]["groups"]}
+    source_survival = source_diag["fresh_credit_stress"]["survived_12m"]
+    assert source_survival["resolved_n"] == 1
+    assert source_survival["small_sample"] is True
+    assert "do not treat the point estimate as a precise probability" in source_survival["warning"]
+
+    feature_diag = diagnostics["feature_strata_base_rates"]["strata"]
+    feature_lookup = {
+        (item["dimension"], item["bucket"], item["credit_group"]): item
+        for item in feature_diag
+    }
+    liquidity_survival = feature_lookup[("liquidity_runway", "12-<24m", "fresh_credit_stress")]["survived_12m"]
+    assert liquidity_survival["resolved_n"] == 1
+    assert liquidity_survival["small_sample"] is True
+
     summary = markdown.read_text(encoding="utf-8")
     assert "Joint equity / credit distress replay" in summary
     assert "Market-observable outcomes" in summary
     assert "Market-observable base-rate comparison" in summary
     assert "Verified legal / business outcome base rates" in summary
     assert "T0 survival-feature strata" in summary
+    assert "Rate uncertainty" in summary
+    assert "Wilson 95%" in summary
+    assert "below **30**" in summary
     assert "12-<24m" in summary
     assert "24-<36m" in summary
     assert "10-<25%" in summary
