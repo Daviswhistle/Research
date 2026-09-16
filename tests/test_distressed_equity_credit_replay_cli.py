@@ -6,11 +6,12 @@ from pathlib import Path
 from distressed_equity.credit_replay_cli import main
 
 
-def test_credit_replay_cli_runs_point_in_time_equity_credit_outcomes_and_base_rates(tmp_path: Path):
+def test_credit_replay_cli_runs_full_point_in_time_outcome_pipeline(tmp_path: Path):
     securities = tmp_path / "securities.csv"
     prices = tmp_path / "prices.csv"
     links = tmp_path / "credit_links.csv"
     bonds = tmp_path / "bonds.csv"
+    source_outcomes = tmp_path / "source_outcomes.csv"
     output = tmp_path / "joint.json"
     markdown = tmp_path / "joint.md"
 
@@ -39,6 +40,14 @@ def test_credit_replay_cli_runs_point_in_time_equity_credit_outcomes_and_base_ra
         "2022-12-30,111111AA1,55,20,4,TRACE normalized\n",
         encoding="utf-8",
     )
+    source_outcomes.write_text(
+        "security_id,ticker,analysis_date,outcome_known_date,survived_12m,existing_common_survived_12m,"
+        "normalized_within_3y,equity_multiple_3y,industry_group,impairment_type,leverage_bucket,evidence_refs,"
+        "verification_status,verifier,verified_on,evidence_reopened,notes\n"
+        "sec-1,TEST,2022-12-31,2025-12-31,true,true,true,3.0,retail,temporary,high,"
+        "SEC:8-K:001;COURT:case-1,verified,reviewer,2026-01-01,true,verified sources\n",
+        encoding="utf-8",
+    )
 
     assert main([
         "--analysis-date", "2022-12-31",
@@ -47,6 +56,7 @@ def test_credit_replay_cli_runs_point_in_time_equity_credit_outcomes_and_base_ra
         "--credit-links-csv", str(links),
         "--bond-observations-csv", str(bonds),
         "--outcome-cutoff", "2026-01-31",
+        "--source-outcomes-csv", str(source_outcomes),
         "--output", str(output),
         "--markdown-output", str(markdown),
     ]) == 0
@@ -85,10 +95,24 @@ def test_credit_replay_cli_runs_point_in_time_equity_credit_outcomes_and_base_ra
     assert stress["median_3y_endpoint_multiple"] == 3.0
     assert stress["median_max_observed_multiple_within_3y"] == 4.0
 
+    source_rates = payload["source_outcome_base_rates"]
+    assert source_rates["knowledge_cutoff"] == "2026-01-31"
+    assert source_rates["known_source_label_count"] == 1
+    source_groups = {group["group"]: group for group in source_rates["groups"]}
+    source_stress = source_groups["fresh_credit_stress"]
+    assert source_stress["cohort_case_count"] == 1
+    assert source_stress["source_labeled_case_count"] == 1
+    assert source_stress["survived_12m_rate"] == 1.0
+    assert source_stress["existing_common_survival_rate"] == 1.0
+    assert source_stress["normalized_within_3y_rate"] == 1.0
+    assert source_stress["three_x_3y_rate"] == 1.0
+    assert source_stress["median_equity_multiple_3y"] == 3.0
+
     summary = markdown.read_text(encoding="utf-8")
     assert "Joint equity / credit distress replay" in summary
     assert "Market-observable outcomes" in summary
     assert "Market-observable base-rate comparison" in summary
+    assert "Verified legal / business outcome base rates" in summary
     assert "fresh_credit_stress" in summary
     assert "TEST" in summary
     assert "55.0" in summary
@@ -97,3 +121,43 @@ def test_credit_replay_cli_runs_point_in_time_equity_credit_outcomes_and_base_ra
     assert "4.00x" in summary
     assert "not labels for corporate survival" in summary
     assert "not bankruptcy/common-survival rates" in summary
+    assert "Missing labels stay missing" in summary
+
+
+def test_source_outcomes_require_explicit_outcome_cutoff(tmp_path: Path):
+    securities = tmp_path / "securities.csv"
+    prices = tmp_path / "prices.csv"
+    links = tmp_path / "credit_links.csv"
+    bonds = tmp_path / "bonds.csv"
+    labels = tmp_path / "labels.csv"
+    securities.write_text(
+        "security_id,symbol,name,exchange,asset_type,start_date,end_date\nsec-1,T,T,NYSE,stock,2010-01-01,\n",
+        encoding="utf-8",
+    )
+    prices.write_text(
+        "security_id,symbol,date,close,adjusted_close\nsec-1,T,2022-12-31,5,5\n",
+        encoding="utf-8",
+    )
+    links.write_text(
+        "security_id,cusip,isin,start_date,end_date,source\nsec-1,111111AA1,,2020-01-01,,x\n",
+        encoding="utf-8",
+    )
+    bonds.write_text(
+        "date,cusip,price_pct_par,yield_pct,source\n2022-12-30,111111AA1,55,20,x\n",
+        encoding="utf-8",
+    )
+    labels.write_text("placeholder\n", encoding="utf-8")
+
+    try:
+        main([
+            "--analysis-date", "2022-12-31",
+            "--securities-csv", str(securities),
+            "--prices-csv", str(prices),
+            "--credit-links-csv", str(links),
+            "--bond-observations-csv", str(bonds),
+            "--source-outcomes-csv", str(labels),
+        ])
+    except ValueError as exc:
+        assert "requires --outcome-cutoff" in str(exc)
+    else:
+        raise AssertionError("expected source outcome labels without a knowledge cutoff to be rejected")
