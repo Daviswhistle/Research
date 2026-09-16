@@ -61,6 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eodhd-key", help="Defaults to EODHD_API_KEY")
     parser.add_argument("--bond-lookback-days", type=int, default=365)
     parser.add_argument("--bond-max-staleness-days", type=int, default=30)
+    parser.add_argument(
+        "--bond-max-benchmark-staleness-days",
+        type=int,
+        default=7,
+        help="Maximum Treasury-curve age relative to a bond observation before spread derivation is refused",
+    )
     parser.add_argument("--bond-probability-horizon-years", type=float, default=1.0)
     parser.add_argument(
         "--bond-recovery-rates",
@@ -265,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
                 cutoff,
                 lookback_days=args.bond_lookback_days,
                 max_staleness_days=args.bond_max_staleness_days,
+                max_benchmark_staleness_days=args.bond_max_benchmark_staleness_days,
                 recovery_rates=_recovery_rates(args.bond_recovery_rates),
                 probability_horizon_years=args.bond_probability_horizon_years,
             )
@@ -336,9 +343,15 @@ def main(argv: list[str] | None = None) -> int:
     if bond_market_payload is not None:
         assessments = bond_market_payload["assessments"]
         observed = [item for item in assessments if item.get("observation") is not None]
-        spread_known = [item for item in observed if item.get("spread_bps") is not None]
-        low_price = [
+        max_staleness_days = int(bond_market_payload.get("max_staleness_days", args.bond_max_staleness_days))
+        fresh_observed = [
             item for item in observed
+            if item.get("days_stale") is not None and int(item["days_stale"]) <= max_staleness_days
+        ]
+        stale_observed = [item for item in observed if item not in fresh_observed]
+        spread_known = [item for item in fresh_observed if item.get("spread_bps") is not None]
+        low_price = [
+            item for item in fresh_observed
             if item.get("observation", {}).get("price_pct_par") is not None
             and item["observation"]["price_pct_par"] < 80
         ]
@@ -347,6 +360,8 @@ def main(argv: list[str] | None = None) -> int:
             f"- Provider: {bond_market_payload['provider']}\n"
             f"- Stable debt instruments assessed: {len(assessments)}\n"
             f"- Instruments with cutoff/lookback market observations: {len(observed)}\n"
+            f"- Fresh observations eligible for current-stress counts: {len(fresh_observed)}\n"
+            f"- Stale observations excluded from current-stress counts: {len(stale_observed)}\n"
             f"- Instruments below 80% of par: {len(low_price)}\n"
             f"- Instruments with benchmarked credit spread: {len(spread_known)}\n"
             "- Probability fields are recovery-sensitive, constant-hazard risk-neutral stress proxies; they are not physical default forecasts.\n"
