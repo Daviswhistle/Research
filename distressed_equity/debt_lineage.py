@@ -282,6 +282,16 @@ def _event_semantic_payload(event: DebtLineageEvent) -> dict[str, Any]:
     }
 
 
+def _event_all_source_refs(event: DebtLineageEvent) -> tuple[str, ...]:
+    """Return every cited span, including participant/accounting-local evidence."""
+
+    refs: list[str] = list(event.source_refs)
+    for participant in (*event.predecessors, *event.successors):
+        refs.extend(participant.source_refs)
+    refs.extend(event.accounting.source_refs)
+    return tuple(dict.fromkeys(refs))
+
+
 def debt_lineage_event_fingerprint(event: DebtLineageEvent) -> str:
     canonical = json.dumps(_event_semantic_payload(event), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
@@ -402,14 +412,6 @@ def _validate_event_shape(event: DebtLineageEvent) -> None:
             raise ValueError(f"{event.event_id}: issuance requires successors and no predecessors")
     elif not event.predecessors and not event.successors:
         raise ValueError(f"{event.event_id}: lineage event must reference at least one instrument")
-    event_ref_set = set(event.source_refs)
-    for participant in (*event.predecessors, *event.successors):
-        unknown = set(participant.source_refs) - event_ref_set
-        if unknown:
-            raise ValueError(f"{event.event_id}: participant source_refs must be included in event source_refs: {sorted(unknown)}")
-    accounting_unknown = set(event.accounting.source_refs) - event_ref_set
-    if accounting_unknown:
-        raise ValueError(f"{event.event_id}: accounting source_refs must be included in event source_refs: {sorted(accounting_unknown)}")
 
 
 def debt_lineage_events_from_dict(raw: dict[str, Any] | list[dict[str, Any]]) -> tuple[DebtLineageEvent, ...]:
@@ -747,14 +749,24 @@ def validate_debt_lineage_events_against_source_packet(source_packet: dict[str, 
             errors.append(f"{event.event_id}: unknown stable_id values: {', '.join(unknown_ids)}")
         if event.effective_date > analysis_date:
             errors.append(f"{event.event_id}: effective_date {event.effective_date.isoformat()} is after workspace cutoff {analysis_date.isoformat()}")
-        unknown_refs = [ref for ref in event.source_refs if ref not in span_map]
+
+        all_source_refs = _event_all_source_refs(event)
+        unknown_refs = [ref for ref in all_source_refs if ref not in span_map]
         if unknown_refs:
             errors.append(f"{event.event_id}: unknown source_refs: {', '.join(unknown_refs)}")
             continue
-        cited_accessions = {str(span_map[ref].get("source_accession") or "").strip() for ref in event.source_refs if str(span_map[ref].get("source_accession") or "").strip()}
+
+        cited_accessions = {
+            str(span_map[ref].get("source_accession") or "").strip()
+            for ref in all_source_refs
+            if str(span_map[ref].get("source_accession") or "").strip()
+        }
         if event.source_accessions and set(event.source_accessions) != cited_accessions:
-            errors.append(f"{event.event_id}: source_accessions {sorted(event.source_accessions)!r} do not match cited span accessions {sorted(cited_accessions)!r}")
-        for ref in event.source_refs:
+            errors.append(
+                f"{event.event_id}: source_accessions {sorted(event.source_accessions)!r} "
+                f"do not match all cited span accessions {sorted(cited_accessions)!r}"
+            )
+        for ref in all_source_refs:
             try:
                 published_on = _parse_date(span_map[ref].get("published_on"), f"span {ref}.published_on")
             except ValueError as exc:
@@ -790,6 +802,7 @@ def debt_lineage_graph_to_dict(graph: DebtLineageGraph) -> dict[str, Any]:
         "candidate_events_are_confirmed": False,
         "verified_requires_fingerprint_bound_reopened_evidence": True,
         "verification_is_bound_to_frozen_source_packet": True,
+        "all_nested_source_refs_are_packet_validated": True,
         "rejected_reviews_are_promoted": False,
         "accounting_treatment_is_auto_inferred": False,
         "participant_amount_meaning": "principal participating in the event, not necessarily full instrument outstanding",
@@ -820,6 +833,8 @@ def debt_lineage_event_template(ledger: DebtInstrumentLedger) -> dict[str, Any]:
         "available_stable_ids": stable_ids,
         "guardrails": [
             "Do not mark status=verified in the event file; verification is a separate artifact bound to event semantics and the frozen source packet.",
+            "Every source ref is validated against the frozen packet independently, including predecessor/successor/accounting-local refs; nested refs need not be duplicated in event.source_refs.",
+            "source_accessions, when supplied, must equal the accessions represented by all top-level and nested source refs.",
             "Do not merge old and new CUSIPs merely to force continuity; represent an exchange as an explicit event between distinct stable IDs.",
             "Use participant amount for the principal actually tendered/exchanged/redeemed when an event is partial.",
             "A partially participating predecessor can remain outstanding and terminal after the event.",
