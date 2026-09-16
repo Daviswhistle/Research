@@ -55,9 +55,8 @@ class EodhdBondProvider:
     Existing EODHD wrappers route CUSIP/ISIN identifiers through the generic EOD
     endpoint using the `.BOND` suffix. Because the older dedicated bond docs are
     no longer published, this adapter treats that route as a compatibility
-    surface and validates every in-range row strictly. A partially incompatible
-    response is rejected rather than silently retaining only rows that happen to
-    look bond-like.
+    surface and validates both the top-level envelope and every in-range row
+    strictly. Unsupported response shapes are failures, not empty history.
 
     Treasury benchmark yields use `/ust/yield-rates` and are selected without
     looking past the bond observation date. Benchmark freshness is enforced by
@@ -125,6 +124,7 @@ class EodhdBondProvider:
 
     @staticmethod
     def _rows(payload: Any) -> list[dict[str, Any]]:
+        """Permissive row helper for the documented Treasury endpoint."""
         if isinstance(payload, list):
             return [row for row in payload if isinstance(row, dict)]
         if isinstance(payload, dict):
@@ -132,6 +132,28 @@ class EodhdBondProvider:
             if isinstance(data, list):
                 return [row for row in data if isinstance(row, dict)]
         return []
+
+    @staticmethod
+    def _bond_rows(payload: Any) -> list[dict[str, Any]]:
+        """Strict compatibility envelope for the undocumented/legacy `.BOND` route."""
+        rows: Any
+        if isinstance(payload, list):
+            rows = payload
+        elif isinstance(payload, dict) and "data" in payload:
+            rows = payload.get("data")
+            if not isinstance(rows, list):
+                raise RuntimeError(
+                    "EODHD .BOND response envelope is incompatible: expected top-level list or data[] list"
+                )
+        else:
+            raise RuntimeError(
+                "EODHD .BOND response envelope is incompatible: expected top-level list or data[] list"
+            )
+        if any(not isinstance(row, dict) for row in rows):
+            raise RuntimeError(
+                "EODHD .BOND response envelope is incompatible: every history row must be an object"
+            )
+        return list(rows)
 
     def _bond_history(self, identifier: str, start: date, end: date) -> tuple[BondMarketObservation, ...]:
         cache_key = (identifier, start, end)
@@ -141,7 +163,7 @@ class EodhdBondProvider:
             f"eod/{identifier}.BOND",
             **{"from": start.isoformat(), "to": end.isoformat(), "period": "d", "order": "a"},
         )
-        raw_rows = self._rows(payload)
+        raw_rows = self._bond_rows(payload)
         output: list[BondMarketObservation] = []
         malformed: list[tuple[str, tuple[str, ...]]] = []
         is_isin = len(identifier) == 12 and identifier[:2].isalpha()
@@ -152,8 +174,6 @@ class EodhdBondProvider:
                 continue
             if not start <= dt <= end:
                 continue
-            # Compatibility route must expose bond-specific price/yield fields.
-            # Never reinterpret stock-like OHLC `close` as a bond price.
             price = _float(raw.get("price"))
             yield_pct = _float(raw.get("yield"))
             volume = _float(raw.get("volume"))
@@ -209,8 +229,6 @@ class EodhdBondProvider:
             if rows:
                 return rows
         if errors:
-            # If one explicit identifier exposed an API/compatibility failure, do
-            # not hide it merely because another identifier returned an empty set.
             raise RuntimeError(
                 "EODHD bond history failed for explicit identifier(s): "
                 + "; ".join(f"{identifier}: {exc}" for identifier, exc in errors)
@@ -249,7 +267,6 @@ class EodhdBondProvider:
         if not math.isfinite(remaining_years) or remaining_years <= 0:
             return None
         rows: list[BondBenchmarkObservation] = []
-        # New-year holidays can require the last business day of the prior year.
         for year in (as_of.year, as_of.year - 1):
             rows.extend(self._treasury_year(year))
         eligible = [row for row in rows if row.date <= as_of]
