@@ -41,6 +41,23 @@ TRACE_FIELDS = [
 ]
 
 
+DAILY_LIST_FIELDS = [
+    "Category",
+    "DL Date",
+    "Update Date",
+    "Trade Report Effective Date",
+    "Effective Date",
+    "Old Trade Report Effective Date",
+    "New Trade Report Effective Date",
+    "Symbol",
+    "CUSIP",
+    "Old Symbol",
+    "New Symbol",
+    "Old CUSIP",
+    "New CUSIP",
+]
+
+
 def _write_trace(path: Path, *, symbol="TEST1", cusip="", execution_date="20230102"):
     row = {
         "Reference Number": "1",
@@ -73,31 +90,95 @@ def _write_trace(path: Path, *, symbol="TEST1", cusip="", execution_date="202301
 
 
 def _write_daily_list(path: Path, rows):
-    fields = [
-        "Category", "Effective Date", "Symbol", "CUSIP",
-        "Old Symbol", "New Symbol", "Old CUSIP", "New CUSIP",
-    ]
     with path.open("w", encoding="utf-8", newline="") as handle:
-        handle.write(",".join(fields) + "\n")
+        handle.write(",".join(DAILY_LIST_FIELDS) + "\n")
         for row in rows:
-            handle.write(",".join(str(row.get(field, "")) for field in fields) + "\n")
+            handle.write(",".join(str(row.get(field, "")) for field in DAILY_LIST_FIELDS) + "\n")
+
+
+def _addition(effective_date: str, symbol="TEST1", cusip="111111AA1"):
+    return {
+        "Category": "SA-Security Addition",
+        "DL Date": effective_date,
+        "Trade Report Effective Date": effective_date,
+        "Symbol": symbol,
+        "CUSIP": cusip,
+    }
 
 
 def test_daily_list_builds_effective_symbol_intervals_without_backfill(tmp_path):
     daily = tmp_path / "daily.csv"
     _write_daily_list(daily, [
-        {"Category": "SA-Security Addition", "Effective Date": "2023-01-01", "Symbol": "TEST1", "CUSIP": "111111AA1"},
+        _addition("2023-01-01"),
         {
-            "Category": "SC-Security Change", "Effective Date": "2023-02-01",
-            "Old Symbol": "TEST1", "New Symbol": "TEST2",
-            "Old CUSIP": "111111AA1", "New CUSIP": "222222BB2",
+            "Category": "SC-Security Change",
+            "DL Date": "2023-02-01",
+            "Update Date": "2023-02-01",
+            # This is a reporting-eligibility property, not the identity-change boundary.
+            "Old Trade Report Effective Date": "2022-01-01",
+            "New Trade Report Effective Date": "2022-01-01",
+            "Old Symbol": "TEST1",
+            "New Symbol": "TEST2",
+            "Old CUSIP": "111111AA1",
+            "New CUSIP": "222222BB2",
         },
     ])
-    resolver = build_trace_security_master_resolver(read_trace_daily_list_events([daily]))
+    events = read_trace_daily_list_events([daily])
+    change = next(event for event in events if event.kind == "change")
+    assert change.effective_date == date(2023, 2, 1)
+    assert change.date_basis == "update_date"
+
+    resolver = build_trace_security_master_resolver(events)
     assert resolver.resolve("TEST1", date(2022, 12, 31)) is None
     assert resolver.resolve("TEST1", date(2023, 1, 31)).cusip == "111111AA1"
     assert resolver.resolve("TEST1", date(2023, 2, 1)) is None
     assert resolver.resolve("TEST2", date(2023, 2, 1)).cusip == "222222BB2"
+
+
+def test_change_uses_dl_date_only_as_availability_fallback_not_new_trade_report_effective_date(tmp_path):
+    daily = tmp_path / "daily.csv"
+    _write_daily_list(daily, [
+        _addition("2023-01-01"),
+        {
+            "Category": "SC-Security Change",
+            "DL Date": "2023-02-10",
+            "Update Date": "",
+            "New Trade Report Effective Date": "2022-06-01",
+            "Old Symbol": "TEST1",
+            "New Symbol": "TEST2",
+            "Old CUSIP": "111111AA1",
+            "New CUSIP": "222222BB2",
+        },
+    ])
+    events = read_trace_daily_list_events([daily])
+    change = next(event for event in events if event.kind == "change")
+    assert change.effective_date == date(2023, 2, 10)
+    assert change.date_basis == "daily_list_date_availability_fallback"
+    resolver = build_trace_security_master_resolver(events)
+    assert resolver.resolve("TEST1", date(2023, 2, 9)).cusip == "111111AA1"
+    assert resolver.resolve("TEST2", date(2023, 2, 9)) is None
+    assert resolver.resolve("TEST2", date(2023, 2, 10)).cusip == "222222BB2"
+
+
+def test_deletion_uses_deletion_effective_date_not_daily_list_date(tmp_path):
+    daily = tmp_path / "daily.csv"
+    _write_daily_list(daily, [
+        _addition("2023-01-01"),
+        {
+            "Category": "SD-Security Deletion",
+            "DL Date": "2023-02-05",
+            "Effective Date": "2023-02-03",
+            "Symbol": "TEST1",
+            "CUSIP": "111111AA1",
+        },
+    ])
+    events = read_trace_daily_list_events([daily])
+    deletion = next(event for event in events if event.kind == "delete")
+    assert deletion.effective_date == date(2023, 2, 3)
+    assert deletion.date_basis == "deletion_effective_date"
+    resolver = build_trace_security_master_resolver(events)
+    assert resolver.resolve("TEST1", date(2023, 2, 2)).cusip == "111111AA1"
+    assert resolver.resolve("TEST1", date(2023, 2, 3)) is None
 
 
 def test_security_master_snapshot_is_never_backfilled_before_as_of_date(tmp_path):
@@ -112,9 +193,7 @@ def test_security_master_snapshot_is_never_backfilled_before_as_of_date(tmp_path
 def test_symbol_only_trace_row_resolves_from_execution_date_mapping(tmp_path):
     daily = tmp_path / "daily.csv"
     raw = tmp_path / "trace.txt"
-    _write_daily_list(daily, [
-        {"Category": "SA-Security Addition", "Effective Date": "2023-01-01", "Symbol": "TEST1", "CUSIP": "111111AA1"},
-    ])
+    _write_daily_list(daily, [_addition("2023-01-01")])
     _write_trace(raw, cusip="", execution_date="20230102")
     resolver = build_trace_security_master_resolver(read_trace_daily_list_events([daily]))
     result = read_trace_enhanced_files_with_security_master([raw], resolver)
@@ -126,9 +205,7 @@ def test_symbol_only_trace_row_resolves_from_execution_date_mapping(tmp_path):
 def test_symbol_only_trace_before_mapping_is_rejected_not_guessed(tmp_path):
     daily = tmp_path / "daily.csv"
     raw = tmp_path / "trace.txt"
-    _write_daily_list(daily, [
-        {"Category": "SA-Security Addition", "Effective Date": "2023-01-03", "Symbol": "TEST1", "CUSIP": "111111AA1"},
-    ])
+    _write_daily_list(daily, [_addition("2023-01-03")])
     _write_trace(raw, cusip="", execution_date="20230102")
     resolver = build_trace_security_master_resolver(read_trace_daily_list_events([daily]))
     with pytest.raises(ValueError, match="no source-backed point-in-time mapping"):
@@ -138,9 +215,7 @@ def test_symbol_only_trace_before_mapping_is_rejected_not_guessed(tmp_path):
 def test_raw_cusip_conflicting_with_point_in_time_symbol_mapping_is_rejected(tmp_path):
     daily = tmp_path / "daily.csv"
     raw = tmp_path / "trace.txt"
-    _write_daily_list(daily, [
-        {"Category": "SA-Security Addition", "Effective Date": "2023-01-01", "Symbol": "TEST1", "CUSIP": "111111AA1"},
-    ])
+    _write_daily_list(daily, [_addition("2023-01-01")])
     _write_trace(raw, cusip="999999ZZ9", execution_date="20230102")
     resolver = build_trace_security_master_resolver(read_trace_daily_list_events([daily]))
     with pytest.raises(ValueError, match="conflicts with point-in-time TRACE Symbol"):
@@ -150,8 +225,8 @@ def test_raw_cusip_conflicting_with_point_in_time_symbol_mapping_is_rejected(tmp
 def test_conflicting_same_day_symbol_starts_are_rejected(tmp_path):
     daily = tmp_path / "daily.csv"
     _write_daily_list(daily, [
-        {"Category": "SA-Security Addition", "Effective Date": "2023-01-01", "Symbol": "TEST1", "CUSIP": "111111AA1"},
-        {"Category": "SA-Security Addition", "Effective Date": "2023-01-01", "Symbol": "TEST1", "CUSIP": "222222BB2"},
+        _addition("2023-01-01", cusip="111111AA1"),
+        _addition("2023-01-01", cusip="222222BB2"),
     ])
     with pytest.raises(ValueError, match="conflicting TRACE symbol/CUSIP starts"):
         build_trace_security_master_resolver(read_trace_daily_list_events([daily]))
@@ -162,9 +237,7 @@ def test_cli_symbol_only_normalization_records_identity_audit_metadata(tmp_path)
     raw = tmp_path / "trace.txt"
     output = tmp_path / "daily_bond.csv"
     metadata = tmp_path / "meta.json"
-    _write_daily_list(daily, [
-        {"Category": "SA-Security Addition", "Effective Date": "2023-01-01", "Symbol": "TEST1", "CUSIP": "111111AA1"},
-    ])
+    _write_daily_list(daily, [_addition("2023-01-01")])
     _write_trace(raw, cusip="", execution_date="20230102")
     assert normalize_main([
         str(raw),
