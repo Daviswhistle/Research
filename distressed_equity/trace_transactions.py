@@ -58,6 +58,39 @@ class TraceTransaction:
             self.contra_party_indicator,
         )
 
+    @property
+    def semantic_key(self) -> tuple[object, ...]:
+        """Report semantics excluding source-file/row provenance.
+
+        FINRA users can legitimately supply overlapping daily/monthly extracts.
+        Repeated bytes from two files must not double volume, while different
+        economics under one report key remain a hard conflict in lifecycle logic.
+        """
+
+        return (
+            self.reference_number,
+            self.trade_status,
+            self.trace_symbol,
+            self.cusip,
+            self.quantity,
+            self.price,
+            self.yield_pct,
+            self.as_of_indicator,
+            self.execution_date,
+            self.execution_time,
+            self.trade_report_date,
+            self.trade_report_time,
+            self.trade_modifier_3,
+            self.trade_modifier_4,
+            self.buy_sell_indicator,
+            self.contra_party_indicator,
+            self.special_price_indicator,
+            self.trading_market_indicator,
+            self.dissemination_flag,
+            self.prior_trade_report_date,
+            self.prior_reference_number,
+        )
+
 
 @dataclass(frozen=True)
 class TraceAggregationConfig:
@@ -89,6 +122,7 @@ class TraceDailyObservation:
 class TraceNormalizationResult:
     observations: tuple[TraceDailyObservation, ...]
     parsed_record_count: int
+    exact_duplicate_record_count: int
     active_record_count: int
     included_record_count: int
     cancelled_record_count: int
@@ -335,6 +369,22 @@ def _report_order(tx: TraceTransaction) -> tuple[date, str, str, int]:
     return tx.trade_report_date, tx.trade_report_time, tx.source_file, tx.source_row
 
 
+def _deduplicate_exact_reports(
+    transactions: Iterable[TraceTransaction],
+) -> tuple[tuple[TraceTransaction, ...], int]:
+    seen: set[tuple[object, ...]] = set()
+    output: list[TraceTransaction] = []
+    duplicate_count = 0
+    for tx in sorted(transactions, key=_report_order):
+        key = tx.semantic_key
+        if key in seen:
+            duplicate_count += 1
+            continue
+        seen.add(key)
+        output.append(tx)
+    return tuple(output), duplicate_count
+
+
 def _apply_trade_lifecycle(
     transactions: Iterable[TraceTransaction],
     *,
@@ -349,7 +399,7 @@ def _apply_trade_lifecycle(
             if tx.trade_status not in {"T", "R"}:
                 raise ValueError(f"unsupported active TRACE Trade Status {tx.trade_status!r}")
             prior = active.get(tx.report_key)
-            if prior is not None and prior != tx:
+            if prior is not None:
                 raise ValueError(
                     f"conflicting TRACE reports share key {tx.trade_report_date.isoformat()}/{tx.reference_number}"
                 )
@@ -418,12 +468,17 @@ def normalize_trace_transactions(
     config: TraceAggregationConfig = TraceAggregationConfig(),
 ) -> TraceNormalizationResult:
     raw = tuple(transactions)
+    deduplicated, duplicate_count = _deduplicate_exact_reports(raw)
     active, cancelled_count, lifecycle_warnings = _apply_trade_lifecycle(
-        raw,
+        deduplicated,
         unresolved_policy=config.unresolved_correction_policy,
     )
     included = tuple(tx for tx in active if _included(tx, config))
     warnings = list(lifecycle_warnings)
+    if duplicate_count:
+        warnings.append(
+            f"collapsed {duplicate_count} exact duplicate TRACE report row(s) across supplied inputs before lifecycle processing"
+        )
     if config.dissemination_policy == "all":
         warnings.append(
             "non-disseminated TRACE reports are included; inter-dealer buy/sell reports may represent two reporting sides of one trade"
@@ -471,6 +526,7 @@ def normalize_trace_transactions(
     return TraceNormalizationResult(
         observations=tuple(daily),
         parsed_record_count=len(raw),
+        exact_duplicate_record_count=duplicate_count,
         active_record_count=len(active),
         included_record_count=len(included),
         cancelled_record_count=cancelled_count,
