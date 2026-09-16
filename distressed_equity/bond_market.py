@@ -129,6 +129,35 @@ def _validate_observation(observation: BondMarketObservation) -> None:
         raise ValueError("bond market volume cannot be negative")
 
 
+def _validate_observation_identity(
+    observation: BondMarketObservation,
+    *,
+    expected_cusip: str | None,
+    expected_isin: str | None,
+) -> None:
+    row_cusip = _clean_identifier(observation.cusip)
+    row_isin = _clean_identifier(observation.isin)
+    matched = False
+    if expected_cusip:
+        if row_cusip is not None and row_cusip != expected_cusip:
+            raise ValueError(
+                f"bond market provider returned CUSIP {row_cusip} for requested CUSIP {expected_cusip}"
+            )
+        matched = matched or row_cusip == expected_cusip
+    if expected_isin:
+        if row_isin is not None and row_isin != expected_isin:
+            raise ValueError(
+                f"bond market provider returned ISIN {row_isin} for requested ISIN {expected_isin}"
+            )
+        matched = matched or row_isin == expected_isin
+    if not matched:
+        requested = "/".join(item for item in (expected_cusip, expected_isin) if item)
+        returned = "/".join(item for item in (row_cusip, row_isin) if item)
+        raise ValueError(
+            f"bond market provider observation identity {returned or 'missing'} does not match requested stable debt identifier {requested}"
+        )
+
+
 def _daily_observations(rows: Iterable[BondMarketObservation]) -> tuple[BondMarketObservation, ...]:
     """Require a single semantic daily observation.
 
@@ -297,6 +326,7 @@ def _assessment(
     filtered: list[BondMarketObservation] = []
     for row in raw_rows:
         _validate_observation(row)
+        _validate_observation_identity(row, expected_cusip=cusip, expected_isin=isin)
         if row.date > analysis_date:
             raise ValueError("bond market provider returned a future observation")
         if start <= row.date <= analysis_date:
