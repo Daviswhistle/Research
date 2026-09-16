@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import re
 from typing import Any
 
@@ -10,14 +11,11 @@ from .structured_debt_extraction import _header_field, _normalize_header
 def install_complex_native_pdf_hardening(complex_module: Any) -> None:
     """Tighten complex native-PDF detection without weakening visual safeguards.
 
-    Two edge cases need special treatment:
-    - a real instrument title such as "Senior Secured Notes" must win over the
-      generic `secured` header classifier when it appears in a transposed header;
-    - a small but explicit coordinate table can be safely parsed even when it is
-      below the prose-oriented native-text density threshold.
-
-    Sparse documents are *not* sent through prose extraction. They are accepted
-    only when the deterministic table parser itself produces candidates.
+    Edge cases handled here:
+    - instrument titles such as "Senior Secured Notes" win over generic header tokens;
+    - sparse but explicit coordinate tables can be parsed without enabling sparse prose;
+    - multiple transposed tables on one page are segmented rather than cross-linked;
+    - transposed header footnotes are scoped to the instrument column that cites them.
     """
 
     if getattr(complex_module, "_complex_native_pdf_hardening_installed", False):
@@ -50,6 +48,188 @@ def install_complex_native_pdf_hardening(complex_module: Any) -> None:
         return None
 
     complex_module._transposed_header = hardened_transposed_header
+
+    original_transposed_page = complex_module._transposed_page
+
+    def _header_for_segment(native: Any, module: Any, rows: list[Any]):
+        field_indices = [
+            index for index, row in enumerate(rows)
+            if complex_module._field_row(row)
+        ]
+        if not field_indices:
+            return None
+        first_field = min(field_indices)
+        if first_field <= 0:
+            return None
+        return complex_module._transposed_header(native, rows, first_field, module)
+
+    def _scope_candidate_footnotes(
+        candidate: Any,
+        spans: tuple[Any, ...],
+        header_row: Any,
+        definitions: dict[str, list[Any]],
+    ) -> Any:
+        span_map = {span.span_id: span for span in spans}
+        footnote_marker_by_id = {
+            definition.span_id: marker
+            for marker, rows in definitions.items()
+            for definition in rows
+        }
+        name = next(
+            (str(item.value) for item in candidate.proposals if item.field == "name"),
+            "",
+        )
+        allowed_markers: set[str] = set()
+        normalized_name = _normalize_header(_strip_trailing_markers(name))
+        for fragment in header_row.fragments:
+            text = fragment.text.strip()
+            if _normalize_header(_strip_trailing_markers(text)) == normalized_name:
+                allowed_markers.update(complex_module._extract_markers(text))
+
+        for ref in candidate.source_span_ids:
+            if ref in footnote_marker_by_id:
+                continue
+            span = span_map.get(ref)
+            if span is not None:
+                allowed_markers.update(complex_module._extract_markers(span.text))
+
+        kept_refs = tuple(
+            ref
+            for ref in candidate.source_span_ids
+            if ref not in footnote_marker_by_id
+            or footnote_marker_by_id[ref] in allowed_markers
+        )
+        if kept_refs == candidate.source_span_ids:
+            return candidate
+        template = dict(candidate.snapshot_template)
+        template["source_refs"] = list(kept_refs)
+        return replace(
+            candidate,
+            source_span_ids=kept_refs,
+            snapshot_template=template,
+        )
+
+    def _remap_segment_ids(spans: tuple[Any, ...], candidates: tuple[Any, ...], segment_number: int):
+        id_map = {
+            span.span_id: f"{span.span_id}:table{segment_number}"
+            for span in spans
+        }
+        remapped_spans = tuple(
+            replace(span, span_id=id_map[span.span_id])
+            for span in spans
+        )
+        remapped_candidates: list[Any] = []
+        for candidate in candidates:
+            proposals = tuple(
+                replace(
+                    proposal,
+                    source_span_id=id_map.get(proposal.source_span_id, proposal.source_span_id),
+                )
+                for proposal in candidate.proposals
+            )
+            refs = tuple(id_map.get(ref, ref) for ref in candidate.source_span_ids)
+            template = dict(candidate.snapshot_template)
+            template["source_refs"] = [id_map.get(ref, ref) for ref in template.get("source_refs", [])]
+            remapped_candidates.append(
+                replace(
+                    candidate,
+                    candidate_id=f"{candidate.candidate_id}:table{segment_number}",
+                    proposals=proposals,
+                    source_span_ids=refs,
+                    snapshot_template=template,
+                )
+            )
+        return remapped_spans, tuple(remapped_candidates)
+
+    def hardened_transposed_page(
+        native: Any,
+        module: Any,
+        page_rows: list[Any],
+        document: Any,
+        definitions: dict[str, list[Any]],
+        *,
+        max_candidates: int,
+    ):
+        if not page_rows or max_candidates <= 0:
+            return None
+
+        header_indices: list[int] = []
+        for field_index, row in enumerate(page_rows):
+            if not complex_module._field_row(row) or field_index <= 0:
+                continue
+            header = complex_module._transposed_header(native, page_rows, field_index, module)
+            if not header:
+                continue
+            header_row, _ = header
+            header_index = next(
+                (index for index, candidate in enumerate(page_rows) if candidate is header_row),
+                None,
+            )
+            if header_index is not None and header_index not in header_indices:
+                header_indices.append(header_index)
+        header_indices.sort()
+        if not header_indices:
+            return None
+
+        # One table preserves the established IDs; still scope its footnotes.
+        if len(header_indices) == 1:
+            result = original_transposed_page(
+                native,
+                module,
+                page_rows,
+                document,
+                definitions,
+                max_candidates=max_candidates,
+            )
+            if not result:
+                return None
+            spans, candidates = result
+            header = _header_for_segment(native, module, page_rows)
+            if not header:
+                return result
+            header_row, _ = header
+            candidates = tuple(
+                _scope_candidate_footnotes(candidate, spans, header_row, definitions)
+                for candidate in candidates
+            )
+            return spans, candidates
+
+        all_spans: dict[str, Any] = {}
+        all_candidates: list[Any] = []
+        for segment_number, start in enumerate(header_indices, 1):
+            if len(all_candidates) >= max_candidates:
+                break
+            end = header_indices[segment_number] if segment_number < len(header_indices) else len(page_rows)
+            segment_rows = page_rows[start:end]
+            result = original_transposed_page(
+                native,
+                module,
+                segment_rows,
+                document,
+                definitions,
+                max_candidates=max_candidates - len(all_candidates),
+            )
+            if not result:
+                continue
+            spans, candidates = result
+            header = _header_for_segment(native, module, segment_rows)
+            if not header:
+                continue
+            header_row, _ = header
+            candidates = tuple(
+                _scope_candidate_footnotes(candidate, spans, header_row, definitions)
+                for candidate in candidates
+            )
+            spans, candidates = _remap_segment_ids(spans, candidates, segment_number)
+            for span in spans:
+                all_spans[span.span_id] = span
+            all_candidates.extend(candidates)
+
+        if not all_candidates:
+            return None
+        return tuple(all_spans.values()), tuple(all_candidates)
+
+    complex_module._transposed_page = hardened_transposed_page
 
     def hardened_complex_extract(
         native: Any,
