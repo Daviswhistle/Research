@@ -6,7 +6,7 @@ from pathlib import Path
 from distressed_equity.credit_replay_cli import main
 
 
-def test_credit_replay_cli_runs_point_in_time_equity_credit_and_market_outcomes(tmp_path: Path):
+def test_credit_replay_cli_runs_point_in_time_equity_credit_outcomes_and_base_rates(tmp_path: Path):
     securities = tmp_path / "securities.csv"
     prices = tmp_path / "prices.csv"
     links = tmp_path / "credit_links.csv"
@@ -75,12 +75,25 @@ def test_credit_replay_cli_runs_point_in_time_equity_credit_and_market_outcomes(
     assert outcome["adjusted_price_multiple_3y"] == 3.0
     assert outcome["max_adjusted_price_multiple_within_3y"] == 4.0
 
+    base_rates = {group["group"]: group for group in payload["market_base_rates"]["groups"]}
+    stress = base_rates["fresh_credit_stress"]
+    assert stress["case_count"] == 1
+    assert stress["same_security_active_12m_rate"] == 1.0
+    assert stress["same_security_active_3y_rate"] == 1.0
+    assert stress["three_x_3y_endpoint_rate"] == 1.0
+    assert stress["three_x_observed_within_3y_rate"] == 1.0
+    assert stress["median_3y_endpoint_multiple"] == 3.0
+    assert stress["median_max_observed_multiple_within_3y"] == 4.0
+
     summary = markdown.read_text(encoding="utf-8")
     assert "Joint equity / credit distress replay" in summary
     assert "Market-observable outcomes" in summary
+    assert "Market-observable base-rate comparison" in summary
+    assert "fresh_credit_stress" in summary
     assert "TEST" in summary
     assert "55.0" in summary
     assert "1600 bps" in summary
     assert "3.00x" in summary
     assert "4.00x" in summary
     assert "not labels for corporate survival" in summary
+    assert "not bankruptcy/common-survival rates" in summary
