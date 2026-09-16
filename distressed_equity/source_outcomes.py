@@ -43,10 +43,17 @@ class SourceBackedOutcomeLabel:
         return f"{self.security_id}|{self.analysis_date.isoformat()}"
 
     def as_known(self, cutoff: date) -> SourceBackedOutcomeLabel | None:
-        """Return only outcome fields whose evidence was knowable by `cutoff`."""
+        """Return only outcome fields and provenance knowable by `cutoff`.
+
+        Row-level evidence can include later documents supporting later metrics.
+        The cutoff-safe view therefore rebuilds `evidence_refs` exclusively from
+        the metric-specific refs admitted by the cutoff instead of retaining the
+        original row-wide evidence set.
+        """
 
         updates: dict[str, object] = {}
         known_dates: list[date] = []
+        admitted_refs: list[str] = []
         metrics = (
             ("survived_12m", "survived_12m_known_date", "survived_12m_evidence_refs"),
             (
@@ -65,10 +72,12 @@ class SourceBackedOutcomeLabel:
             value = getattr(self, value_field)
             known_date = getattr(self, date_field)
             if value is not None and known_date is not None and known_date <= cutoff:
+                refs = getattr(self, refs_field)
                 updates[value_field] = value
                 updates[date_field] = known_date
-                updates[refs_field] = getattr(self, refs_field)
+                updates[refs_field] = refs
                 known_dates.append(known_date)
+                admitted_refs.extend(refs)
             else:
                 updates[value_field] = None
                 updates[date_field] = None
@@ -76,6 +85,10 @@ class SourceBackedOutcomeLabel:
         if not known_dates:
             return None
         updates["outcome_known_date"] = max(known_dates)
+        updates["evidence_refs"] = tuple(dict.fromkeys(admitted_refs))
+        # Free-form row notes may summarize later evidence/outcomes and therefore
+        # are intentionally withheld from the cutoff-safe partial view.
+        updates["notes"] = None
         return replace(self, **updates)
 
 
@@ -465,6 +478,7 @@ def compare_source_outcome_base_rates(
         groups=groups,
         semantics=(
             "source-backed outcome fields are admitted metric-by-metric only when that metric's known date is on or before the knowledge cutoff",
+            "cutoff-safe labels rebuild row-level evidence_refs from only the admitted metric evidence; later row-wide evidence and free-form notes are withheld",
             "legacy rows without metric-specific provenance fall back to outcome_known_date plus the row-level evidence refs",
             "metric-specific known dates require metric-specific evidence refs so later evidence cannot be used to backdate knowledge",
             "group denominators expose both cohort_case_count and source_labeled_case_count so missing legal/business outcome coverage is not treated as failure",
