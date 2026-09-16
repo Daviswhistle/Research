@@ -5,6 +5,11 @@ from datetime import date
 import json
 from pathlib import Path
 
+from .calibration_stability import (
+    CalibrationStabilityReport,
+    calibration_stability_to_dict,
+    evaluate_calibration_stability,
+)
 from .credit_replay import CreditReplayConfig, CsvCreditIdentityIndex, JointReplayRun, run_joint_credit_replay
 from .csv_bond_market import CsvBondMarketProvider
 from .csv_market import CsvMarketProvider
@@ -22,13 +27,20 @@ _DEFAULT_FEATURE_DIMENSIONS = (
     "net_leverage",
     "impairment_type",
 )
+_DEFAULT_STABILITY_DIMENSIONS = (
+    "target_date",
+    "target_year",
+    "credit_group",
+    "calibration_n_band",
+    "basis_bucket",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Replay multiple historical distress cutoffs, build cutoff-safe walk-forward priors at each later cutoff, "
-            "and evaluate each forecast family against source-backed outcomes"
+            "evaluate each forecast family against source-backed outcomes, and slice realized calibration stability"
         )
     )
     parser.add_argument(
@@ -66,6 +78,14 @@ def build_parser() -> argparse.ArgumentParser:
             "covenant_headroom,net_leverage,impairment_type"
         ),
     )
+    parser.add_argument(
+        "--stability-dimensions",
+        default=",".join(_DEFAULT_STABILITY_DIMENSIONS),
+        help=(
+            "Comma-separated realized calibration slices: target_date,target_year,credit_group,"
+            "calibration_n_band,basis_bucket"
+        ),
+    )
     parser.add_argument("--episode-gap-days", type=int, default=365)
     parser.add_argument("--small-sample-n", type=int, default=30)
     parser.add_argument(
@@ -86,10 +106,10 @@ def _analysis_dates(values: list[str]) -> tuple[date, ...]:
     return parsed
 
 
-def _feature_dimensions(raw: str) -> tuple[str, ...]:
+def _dimensions(raw: str, *, option: str) -> tuple[str, ...]:
     values = tuple(item.strip() for item in raw.split(",") if item.strip())
     if not values:
-        raise ValueError("--feature-dimensions must contain at least one dimension")
+        raise ValueError(f"{option} must contain at least one dimension")
     return values
 
 
@@ -112,8 +132,17 @@ def _joint_run(
     return run_joint_credit_replay(equity, credit_provider, links, config=credit_config)
 
 
+def _fmt_pct(value: float | None) -> str:
+    return "—" if value is None else f"{value:.1%}"
+
+
+def _fmt_float(value: float | None, digits: int = 4) -> str:
+    return "—" if value is None else f"{value:.{digits}f}"
+
+
 def _markdown(
     report: PriorCalibrationReport,
+    stability: CalibrationStabilityReport,
     *,
     analysis_dates: tuple[date, ...],
     prior_runs: tuple[WalkForwardPriorRun, ...],
@@ -130,9 +159,9 @@ def _markdown(
         "|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for item in report.summaries:
-        mean_p = "—" if item.mean_predicted_probability is None else f"{item.mean_predicted_probability:.1%}"
-        observed = "—" if item.observed_rate is None else f"{item.observed_rate:.1%}"
-        brier = "—" if item.brier_score is None else f"{item.brier_score:.4f}"
+        mean_p = _fmt_pct(item.mean_predicted_probability)
+        observed = _fmt_pct(item.observed_rate)
+        brier = _fmt_float(item.brier_score)
         median_n = "—" if item.median_calibration_resolved_n is None else f"{item.median_calibration_resolved_n:.1f}"
         lines.append(
             f"| {item.basis} | {item.metric} | {item.forecast_count} | {mean_p} | {observed} | "
@@ -152,20 +181,37 @@ def _markdown(
         for bin_row in summary.bins:
             bracket = "]" if bin_row.upper_inclusive else ")"
             interval = f"[{bin_row.lower_bound:.2f}, {bin_row.upper_bound:.2f}{bracket}"
-            mean_p = "—" if bin_row.mean_predicted_probability is None else f"{bin_row.mean_predicted_probability:.1%}"
-            observed = "—" if bin_row.observed_rate is None else f"{bin_row.observed_rate:.1%}"
-            brier = "—" if bin_row.brier_score is None else f"{bin_row.brier_score:.4f}"
-            lines.append(f"| {interval} | {bin_row.forecast_count} | {mean_p} | {observed} | {brier} |")
-        lines.append("")
-
-    if report.warnings:
-        lines.extend(["## Warnings", ""])
-        lines.extend(f"- {warning}" for warning in report.warnings)
+            lines.append(
+                f"| {interval} | {bin_row.forecast_count} | {_fmt_pct(bin_row.mean_predicted_probability)} | "
+                f"{_fmt_pct(bin_row.observed_rate)} | {_fmt_float(bin_row.brier_score)} |"
+            )
         lines.append("")
 
     lines.extend(
         [
-            "> Each basis is a separate forecast family. Credit-group, liquidity, maturity, covenant, leverage, and impairment priors overlap and are not averaged into one synthetic probability. Brier scores evaluate the raw ex-ante empirical rates emitted at each target T0; realized outcomes are admitted only when their source-backed metric known date is on or before the evaluation cutoff.",
+            "## Stability slices",
+            "",
+            "| Dimension | Slice | Basis | Metric | Forecasts | Target dates | Securities | Mean predicted | Observed | Gap | Brier | Median calibration n |",
+            "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for item in stability.slices:
+        median_n = "—" if item.median_calibration_resolved_n is None else f"{item.median_calibration_resolved_n:.1f}"
+        lines.append(
+            f"| {item.dimension} | {item.value} | {item.basis} | {item.metric} | {item.forecast_count} | "
+            f"{item.unique_target_date_count} | {item.unique_security_count} | {_fmt_pct(item.mean_predicted_probability)} | "
+            f"{_fmt_pct(item.observed_rate)} | {_fmt_pct(item.calibration_gap)} | {_fmt_float(item.brier_score)} | {median_n} |"
+        )
+
+    if report.warnings or stability.warnings:
+        lines.extend(["", "## Warnings", ""])
+        lines.extend(f"- {warning}" for warning in report.warnings)
+        lines.extend(f"- {warning}" for warning in stability.warnings)
+        lines.append("")
+
+    lines.extend(
+        [
+            "> Each basis is a separate forecast family. Credit-group, liquidity, maturity, covenant, leverage, and impairment priors overlap and are not averaged into one synthetic probability. Stability slices only regroup already-realized OOS forecasts; they do not refit or alter probabilities. Calendar slices are descriptive dates/years, not automatically named economic regimes.",
             "",
         ]
     )
@@ -176,7 +222,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     analysis_dates = _analysis_dates(args.analysis_date)
     evaluation_cutoff = date.fromisoformat(args.evaluation_cutoff)
-    dimensions = _feature_dimensions(args.feature_dimensions)
+    feature_dimensions = _dimensions(args.feature_dimensions, option="--feature-dimensions")
+    stability_dimensions = _dimensions(args.stability_dimensions, option="--stability-dimensions")
 
     equity_provider = CsvMarketProvider(args.securities_csv, args.prices_csv)
     credit_provider = CsvBondMarketProvider(args.bond_observations_csv)
@@ -220,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
                 historical,
                 outcomes,
                 features,
-                dimensions=dimensions,
+                dimensions=feature_dimensions,
                 episode_gap_days=args.episode_gap_days,
                 small_sample_n=args.small_sample_n,
             )
@@ -232,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         evaluation_cutoff,
         bin_width=args.calibration_bin_width,
     )
+    stability = evaluate_calibration_stability(report, dimensions=stability_dimensions)
     payload = prior_calibration_to_dict(report)
     payload["analysis_dates"] = [item.isoformat() for item in analysis_dates]
     payload["walk_forward_prior_runs"] = [
@@ -244,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         }
         for run in prior_runs
     ]
+    payload["stability"] = calibration_stability_to_dict(stability)
 
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
@@ -257,7 +306,12 @@ def main(argv: list[str] | None = None) -> int:
         markdown_path = Path(args.markdown_output)
         markdown_path.parent.mkdir(parents=True, exist_ok=True)
         markdown_path.write_text(
-            _markdown(report, analysis_dates=analysis_dates, prior_runs=tuple(prior_runs)),
+            _markdown(
+                report,
+                stability,
+                analysis_dates=analysis_dates,
+                prior_runs=tuple(prior_runs),
+            ),
             encoding="utf-8",
         )
     return 0
