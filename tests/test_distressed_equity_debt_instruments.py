@@ -1,9 +1,12 @@
 from datetime import date
 
+import pytest
+
 from distressed_equity.debt_instruments import (
     DebtInstrumentSnapshot,
     build_debt_instrument_ledger,
     debt_instrument_ledger_to_dict,
+    debt_snapshots_from_dict,
     instrument_match_score,
 )
 
@@ -117,3 +120,62 @@ def test_ledger_serialization_is_json_native():
     payload = debt_instrument_ledger_to_dict(build_debt_instrument_ledger((snapshot,)))
     assert payload["versions"][0]["snapshot"]["as_of_date"] == "2022-12-31"
     assert isinstance(payload["unmatched_versions"], list)
+
+
+def test_snapshot_parser_rejects_non_boolean_secured():
+    raw = {
+        "instruments": [
+            {
+                "as_of_date": "2022-12-31",
+                "source_accession": "a",
+                "name": "Unsecured Notes",
+                "secured": "false",
+            }
+        ]
+    }
+    with pytest.raises(ValueError, match="secured must be boolean or null"):
+        debt_snapshots_from_dict(raw)
+
+
+def test_same_year_maturity_extension_uses_full_date():
+    old = DebtInstrumentSnapshot(
+        as_of_date=date(2022, 12, 31),
+        source_accession="a",
+        name="Notes",
+        maturity_date=date(2027, 6, 30),
+        maturity_year=2027,
+        cusip="123456AB7",
+    )
+    new = DebtInstrumentSnapshot(
+        as_of_date=date(2023, 3, 31),
+        source_accession="b",
+        name="Notes",
+        maturity_date=date(2027, 12, 31),
+        maturity_year=2027,
+        cusip="123456AB7",
+    )
+    ledger = build_debt_instrument_ledger((old, new))
+    assert "maturity_extended" in ledger.changes[0].classification
+    assert "maturity_accelerated" not in ledger.changes[0].classification
+
+
+def test_same_year_precision_change_is_not_assigned_direction():
+    old = DebtInstrumentSnapshot(
+        as_of_date=date(2022, 12, 31),
+        source_accession="a",
+        name="Notes",
+        maturity_year=2027,
+        cusip="123456AB7",
+    )
+    new = DebtInstrumentSnapshot(
+        as_of_date=date(2023, 3, 31),
+        source_accession="b",
+        name="Notes",
+        maturity_date=date(2027, 12, 31),
+        maturity_year=2027,
+        cusip="123456AB7",
+    )
+    ledger = build_debt_instrument_ledger((old, new))
+    assert "maturity_precision_changed" in ledger.changes[0].classification
+    assert "maturity_extended" not in ledger.changes[0].classification
+    assert "maturity_accelerated" not in ledger.changes[0].classification
