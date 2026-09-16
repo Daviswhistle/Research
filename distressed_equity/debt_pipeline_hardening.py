@@ -44,9 +44,10 @@ def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_m
         guardrails = tuple(dict.fromkeys((*task.guardrails,
             "Set each retained snapshot's as_of_date from the economic measurement/effective date supported by evidence; never substitute the SEC filing/publication date.",
             "Complete verification.status/verifier/verified_on/evidence_reopened only after re-opening every cited source span.",
+            "After all snapshot fields are finalized, bind verification to the complete row and frozen source packet before marking it verified.",
         )))
         required_output = tuple(dict.fromkeys((*task.required_output,
-            "Per-instrument verification object with status, verifier, verified_on, and evidence_reopened",
+            "Per-instrument verification object with status, verifier, verified_on, evidence_reopened, source_packet_fingerprint, and row_fingerprint",
             "Verified economic as_of_date for every retained instrument",
         )))
         return replace(task, guardrails=guardrails, required_output=required_output)
@@ -62,10 +63,13 @@ def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_m
             row = dict(raw)
             row["as_of_date"] = None
             row["verification"] = {
+                "schema_version": "2",
                 "status": "unverified",
                 "verifier": None,
                 "verified_on": None,
                 "evidence_reopened": False,
+                "source_packet_fingerprint": None,
+                "row_fingerprint": None,
             }
             rows.append(row)
         payload["instruments"] = rows
@@ -73,6 +77,7 @@ def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_m
         warnings.extend([
             "Generated snapshot rows are intentionally unverified; fill the verification object only after reopening cited evidence.",
             "as_of_date is intentionally null until the economic measurement/effective date is verified.",
+            "After editing snapshot semantics, generate fresh source-packet and row fingerprints before approval; changing either the row or frozen evidence invalidates approval.",
         ])
         payload["warnings"] = list(dict.fromkeys(warnings))
         return payload
@@ -80,7 +85,8 @@ def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_m
     sec_module.instrument_verification_template = hardened_verification_template
 
     # ------------------------------------------------------------------
-    # 2. Ledger JSON cannot carry NaN/Infinity into matching or lineage.
+    # 2. Ledger JSON cannot carry NaN/Infinity or silently truncate fractional
+    #    maturity years into matching or lineage.
     # ------------------------------------------------------------------
     original_snapshot_from_dict = debt_module._snapshot_from_dict
     finite_keys = (
@@ -97,13 +103,20 @@ def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_m
                 continue  # original parser emits the canonical numeric type error
             if not math.isfinite(float(value)):
                 raise ValueError(f"{name}: {key} must be finite")
+        maturity_year = raw.get("maturity_year")
+        if isinstance(maturity_year, (int, float)) and not isinstance(maturity_year, bool):
+            numeric_year = float(maturity_year)
+            if not math.isfinite(numeric_year) or not numeric_year.is_integer():
+                raise ValueError(f"{name}: maturity_year must be an integral year")
         return original_snapshot_from_dict(raw)
 
     debt_module._snapshot_from_dict = hardened_snapshot_from_dict
 
     # ------------------------------------------------------------------
     # 3. Boundary snapshot ties must be source-disambiguated at ANY selected
-    #    boundary date, not only on the event date itself.
+    #    boundary date, not only on the event date itself. If no observation
+    #    exists on the correct side of the event, preserve contextual terms but
+    #    blank principal so it cannot become an implicit participating amount.
     # ------------------------------------------------------------------
     def hardened_boundary_snapshot(
         versions: tuple[Any, ...],
@@ -158,18 +171,18 @@ def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_m
                     f"predecessor observation date {selected_date.isoformat()} differs from "
                     f"event effective date {event_date.isoformat()}"
                 )
-            return snapshot, (
+            return replace(snapshot, principal=None), (
                 f"predecessor first observed {selected_date.isoformat()} after event effective date "
-                f"{event_date.isoformat()}"
+                f"{event_date.isoformat()}; observed principal is not used as an implicit participating amount"
             )
         if selected_date > event_date:
             return snapshot, (
                 f"successor observation date {selected_date.isoformat()} differs from "
                 f"event effective date {event_date.isoformat()}"
             )
-        return snapshot, (
+        return replace(snapshot, principal=None), (
             f"successor last observed {selected_date.isoformat()} before event effective date "
-            f"{event_date.isoformat()}"
+            f"{event_date.isoformat()}; observed principal is not used as an implicit participating amount"
         )
 
     lineage_module._boundary_snapshot = hardened_boundary_snapshot
@@ -217,13 +230,42 @@ def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_m
     lineage_module._impact_for_event = hardened_impact_for_event
 
     # ------------------------------------------------------------------
-    # 5. Terminal topology uses aggregate consumption against one observed
-    #    predecessor state. Two 500 exchanges of a 1,000 note fully consume it.
+    # 5. Public graph construction re-validates numeric event semantics even
+    #    when callers bypass JSON parsers and construct dataclasses directly.
+    # ------------------------------------------------------------------
+    def _validate_programmatic_event_numbers(event: Any) -> None:
+        def check(value: Any, field: str) -> None:
+            if value is None:
+                return
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{event.event_id}: {field} must be numeric")
+            numeric = float(value)
+            if not math.isfinite(numeric):
+                raise ValueError(f"{event.event_id}: {field} must be finite")
+            if numeric < 0:
+                raise ValueError(f"{event.event_id}: {field} must be non-negative")
+
+        for index, participant in enumerate(event.predecessors):
+            check(participant.amount, f"predecessors[{index}].amount")
+        for index, participant in enumerate(event.successors):
+            check(participant.amount, f"successors[{index}].amount")
+        check(event.cash_paid, "cash_paid")
+        check(event.fees_paid, "fees_paid")
+        check(event.equity_issued_shares, "equity_issued_shares")
+        check(event.equity_issued_value, "equity_issued_value")
+        check(event.accounting.quantitative_test_pct, "accounting.quantitative_test_pct")
+
+    # ------------------------------------------------------------------
+    # 6. Terminal topology uses aggregate consumption against one complete
+    #    observed predecessor state. Distinct as-of dates within one accession
+    #    remain distinct observations.
     # ------------------------------------------------------------------
     original_build_graph = lineage_module.build_debt_lineage_graph
 
     def hardened_build_graph(ledger: Any, events: Any):
         events_tuple = tuple(events)
+        for event in events_tuple:
+            _validate_programmatic_event_numbers(event)
         graph = original_build_graph(ledger, events_tuple)
         versions_by_id = lineage_module._versions_by_id(ledger)
         verified_events = [event for event in events_tuple if event.status == "verified"]
@@ -234,8 +276,8 @@ def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_m
         }
         incoming: set[str] = set()
         outgoing: set[str] = set()
-        consumption: dict[tuple[str, str], float] = {}
-        caps: dict[tuple[str, str], float] = {}
+        consumption: dict[tuple[str, date, str], float] = {}
+        caps: dict[tuple[str, date, str], float] = {}
 
         for event in verified_events:
             predecessor_ids = {item.stable_id for item in event.predecessors}
@@ -256,7 +298,7 @@ def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_m
                     and amount is not None
                     and snapshot.principal is not None
                 ):
-                    key = (participant.stable_id, snapshot.source_accession)
+                    key = (participant.stable_id, snapshot.as_of_date, snapshot.source_accession)
                     consumption[key] = consumption.get(key, 0.0) + amount
                     caps[key] = snapshot.principal
                     continue
