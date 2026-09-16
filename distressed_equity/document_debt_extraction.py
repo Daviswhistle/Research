@@ -3,14 +3,15 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from . import native_pdf_debt_extraction as _native_pdf
 from . import sec_instruments
+from .complex_native_pdf_debt_extraction import install_complex_native_pdf_extraction
 from .complex_table_debt_extraction import install_complex_table_extraction
 from .native_pdf_debt_extraction import (
     _MIN_NATIVE_FRAGMENTS,
     _MIN_NATIVE_TEXT_CHARS,
     _pdf_bytes,
     _pdf_status_warning,
-    extract_native_pdf_debt_candidates,
     extract_pdf_text_fragments,
     layout_rows,
 )
@@ -27,11 +28,7 @@ class VisualExtractionRequiredError(RuntimeError):
 
 
 class NativePdfTextPayload(str):
-    """String-compatible native PDF text carrying the original PDF bytes.
-
-    Source/reference resolvers can scan this value as ordinary text while debt
-    extraction can recover the exact bytes and reconstruct coordinate-based rows.
-    """
+    """String-compatible native PDF text carrying the original PDF bytes."""
 
     pdf_bytes: bytes
     source_url: str
@@ -66,18 +63,13 @@ def extract_document_source_candidates(
     max_candidates: int = 20,
     text_cache: dict[str, str] | None = None,
 ) -> tuple[tuple[Any, ...], tuple[Any, ...], tuple[str, ...]]:
-    """Extract debt candidates without losing media-type safety.
-
-    Returns `(spans, candidates, warnings)` and is safe to use for documents found
-    after the initial SEC packet (source graph, contract identity, named entity,
-    foreign closure). PDF bytes are never decoded through `response.text`.
-    """
+    """Extract debt candidates without losing media-type safety."""
 
     media_type = _visual_media_type(document)
     if media_type == "pdf":
         try:
             content = _pdf_bytes(client, document.url)
-            result = extract_native_pdf_debt_candidates(
+            result = _native_pdf.extract_native_pdf_debt_candidates(
                 sec_instruments,
                 content,
                 document,
@@ -163,21 +155,16 @@ def extract_document_source_candidates(
 
 
 def install_document_aware_extraction(module: Any) -> None:
-    """Patch SEC helpers before downstream modules bind them.
-
-    This makes source-graph, locator-less-contract and named-entity paths PDF-safe
-    without requiring each caller to special-case binary documents. HTML behavior
-    remains delegated to the installed structured + complex-table extractors.
-    """
+    """Patch SEC helpers before downstream modules bind them."""
 
     if getattr(module, "_document_aware_extraction_installed", False):
         return
 
-    # Structured extraction is installed immediately before this hook. Extend that
-    # HTML path with orientation-aware / multi-row / footnote-aware table parsing,
-    # then capture the resulting callable below so every downstream document path
-    # sees the same behavior.
     install_complex_table_extraction(module)
+    # The native-PDF packet builder installed immediately before this function uses
+    # the native module's global extractor at runtime, so patching the module here
+    # upgrades both initial SEC-packet PDFs and later source-graph PDFs.
+    install_complex_native_pdf_extraction(_native_pdf)
 
     original_get_text = module._get_text
     original_extract = module.extract_source_candidates
@@ -208,7 +195,7 @@ def install_document_aware_extraction(module: Any) -> None:
                         "PDF extraction requires binary native-text payload; unstructured text input refused",
                     )
                 )
-            result = extract_native_pdf_debt_candidates(
+            result = _native_pdf.extract_native_pdf_debt_candidates(
                 module,
                 document_text.pdf_bytes,
                 document,
