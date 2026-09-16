@@ -51,6 +51,14 @@ class WalkForwardPriorRun:
     semantics: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _HistoricalEpisode:
+    representative: JointDistressSeed
+    start_date: date
+    end_date: date
+    member_case_keys: tuple[str, ...]
+
+
 def _case_key(item: JointDistressSeed) -> str:
     return f"{item.equity.security.security_id}|{item.equity.analysis_date.isoformat()}"
 
@@ -61,27 +69,65 @@ def _credit_group(item: JointDistressSeed) -> str:
     return "fresh_credit_stress" if item.any_credit_stress else "fresh_credit_no_stress"
 
 
-def _episode_dedup(
+def _historical_episodes(
     cases: Iterable[JointDistressSeed],
     *,
     episode_gap_days: int,
-) -> tuple[JointDistressSeed, ...]:
+) -> tuple[_HistoricalEpisode, ...]:
+    """Collapse connected same-security distress observations into episodes.
+
+    Connectivity is based on the gap between consecutive raw observations, not
+    distance from the first retained representative. The earliest observation is
+    retained as the episode representative while the full episode end date is
+    preserved for target self-exclusion.
+    """
+
     if episode_gap_days < 0:
         raise ValueError("episode_gap_days cannot be negative")
     by_security: dict[str, list[JointDistressSeed]] = {}
     for item in cases:
         by_security.setdefault(item.equity.security.security_id, []).append(item)
-    output: list[JointDistressSeed] = []
+
+    episodes: list[_HistoricalEpisode] = []
     for security_id in sorted(by_security):
         rows = sorted(by_security[security_id], key=lambda item: item.equity.analysis_date)
-        last_included: date | None = None
-        for item in rows:
-            current = item.equity.analysis_date
-            if last_included is not None and (current - last_included).days <= episode_gap_days:
-                continue
-            output.append(item)
-            last_included = current
-    return tuple(sorted(output, key=lambda item: (item.equity.analysis_date, item.equity.security.security_id)))
+        if not rows:
+            continue
+        members: list[JointDistressSeed] = [rows[0]]
+        previous_date = rows[0].equity.analysis_date
+        for item in rows[1:]:
+            current_date = item.equity.analysis_date
+            if (current_date - previous_date).days <= episode_gap_days:
+                members.append(item)
+            else:
+                episodes.append(
+                    _HistoricalEpisode(
+                        representative=members[0],
+                        start_date=members[0].equity.analysis_date,
+                        end_date=members[-1].equity.analysis_date,
+                        member_case_keys=tuple(_case_key(member) for member in members),
+                    )
+                )
+                members = [item]
+            previous_date = current_date
+        episodes.append(
+            _HistoricalEpisode(
+                representative=members[0],
+                start_date=members[0].equity.analysis_date,
+                end_date=members[-1].equity.analysis_date,
+                member_case_keys=tuple(_case_key(member) for member in members),
+            )
+        )
+
+    return tuple(
+        sorted(
+            episodes,
+            key=lambda episode: (
+                episode.representative.equity.analysis_date,
+                episode.representative.equity.security.security_id,
+            ),
+        )
+    )
 
 
 def _label_metric(
@@ -160,11 +206,12 @@ def build_walk_forward_priors(
 ) -> WalkForwardPriorRun:
     """Build empirical priors using only information knowable at target T0.
 
-    Target-cohort outcomes are never used. Historical labels must have
-    `outcome_known_date <= target.analysis_date`. Repeated observations of the
-    same security within the configured episode gap are collapsed before
-    calibration, and same-security history inside the target's episode gap is
-    excluded from that target case's prior.
+    Target-cohort outcomes are never used. Historical outcome metrics are masked
+    unless their metric-specific known date is <= target.analysis_date. Repeated
+    same-security observations connected by consecutive gaps within the episode
+    threshold are collapsed to one episode before calibration. A historical
+    episode of the target security is excluded if that episode ended within the
+    configured gap before target T0.
     """
 
     dims = tuple(dimensions)
@@ -183,7 +230,8 @@ def build_walk_forward_priors(
             + ", ".join(item.isoformat() for item in future_or_same)
         )
     history_cases_raw = tuple(item for run in history_runs for item in run.candidates)
-    history_cases = _episode_dedup(history_cases_raw, episode_gap_days=episode_gap_days)
+    episodes = _historical_episodes(history_cases_raw, episode_gap_days=episode_gap_days)
+    history_cases = tuple(episode.representative for episode in episodes)
     known_labels = {
         label.case_key: label
         for label in outcomes.known_labels(target.analysis_date)
@@ -193,16 +241,15 @@ def build_walk_forward_priors(
     for target_case in target.candidates:
         target_security_id = target_case.equity.security.security_id
         target_date = target_case.equity.analysis_date
-        # Prevent a previous observation of the same ongoing distress episode
-        # from becoming its own empirical prior.
-        eligible_history = tuple(
-            item
-            for item in history_cases
+        eligible_episodes = tuple(
+            episode
+            for episode in episodes
             if not (
-                item.equity.security.security_id == target_security_id
-                and (target_date - item.equity.analysis_date).days <= episode_gap_days
+                episode.representative.equity.security.security_id == target_security_id
+                and (target_date - episode.end_date).days <= episode_gap_days
             )
         )
+        eligible_history = tuple(episode.representative for episode in eligible_episodes)
         credit_group = _credit_group(target_case)
         same_credit = tuple(item for item in eligible_history if _credit_group(item) == credit_group)
         credit_prior = _stratum(
@@ -256,21 +303,23 @@ def build_walk_forward_priors(
             )
         )
 
+    representative_keys = {_case_key(item) for item in history_cases}
     return WalkForwardPriorRun(
         target_analysis_date=target.analysis_date,
         historical_run_dates=tuple(run.analysis_date for run in history_runs),
         episode_gap_days=episode_gap_days,
         historical_case_count_before_episode_dedup=len(history_cases_raw),
         historical_case_count_after_episode_dedup=len(history_cases),
-        source_labels_known_by_target=sum(key in {_case_key(item) for item in history_cases} for key in known_labels),
+        source_labels_known_by_target=sum(key in representative_keys for key in known_labels),
         target_case_count=len(target.candidates),
         priors=tuple(priors),
         semantics=(
             "walk-forward priors use only historical analysis dates strictly before target T0",
-            "source-backed labels are admitted only when outcome_known_date is on or before target T0",
+            "source-backed outcome metrics are admitted individually only when their metric-specific known date is on or before target T0",
             "target-cohort outcomes are never used to build the target prior",
-            "repeated historical observations of the same security within episode_gap_days are collapsed before calibration",
-            "same-security history inside the target episode gap is excluded from that target case's prior",
+            "same-security historical observations are grouped into connected episodes when every consecutive observation gap stays within episode_gap_days",
+            "the earliest observed case represents each historical episode for calibration, while the full episode end date is retained for target self-exclusion",
+            "same-security historical episodes ending inside the target episode gap are excluded from that target case's prior",
             "raw empirical rates, resolved denominators, Wilson 95% intervals, and small-sample warnings are preserved; no LLM probability adjustment is applied",
         ),
     )
