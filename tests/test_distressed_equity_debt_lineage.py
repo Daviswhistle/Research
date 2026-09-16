@@ -40,6 +40,28 @@ def exchange_ledger():
     return build_debt_instrument_ledger((old, new))
 
 
+def same_day_exchange_ledger():
+    old = DebtInstrumentSnapshot(
+        as_of_date=date(2023, 2, 1),
+        source_accession="old-event",
+        name="Old Notes",
+        principal=1_000.0,
+        maturity_year=2025,
+        secured=False,
+        cusip="111111AA1",
+    )
+    new = DebtInstrumentSnapshot(
+        as_of_date=date(2023, 2, 1),
+        source_accession="new-event",
+        name="New Notes",
+        principal=550.0,
+        maturity_year=2028,
+        secured=True,
+        cusip="222222BB2",
+    )
+    return build_debt_instrument_ledger((old, new))
+
+
 def exchange_event(*, status="verified", predecessor_amount=600.0, successor_amount=550.0):
     return {
         "events": [
@@ -123,6 +145,7 @@ def test_exchange_links_distinct_cusips_without_collapsing_stable_ids():
         "existing_common_dilution",
         "accounting_extinguishment",
     }
+    assert any("observation date" in item for item in impact.unresolved)
 
 
 def test_partial_exchange_uses_participating_amount_not_full_old_principal():
@@ -185,6 +208,56 @@ def test_amendment_cannot_be_used_to_bridge_different_stable_ids():
         debt_lineage_events_from_dict(raw)
 
 
+def test_same_id_amendment_does_not_destroy_root_or_terminal_identity():
+    old = DebtInstrumentSnapshot(
+        as_of_date=date(2022, 12, 31),
+        source_accession="a",
+        name="Term Loan",
+        principal=800.0,
+        maturity_year=2026,
+        cusip="444444DD4",
+    )
+    new = DebtInstrumentSnapshot(
+        as_of_date=date(2023, 3, 31),
+        source_accession="b",
+        name="Term Loan",
+        principal=790.0,
+        maturity_year=2027,
+        cusip="444444DD4",
+    )
+    ledger = build_debt_instrument_ledger((old, new))
+    raw = {
+        "events": [
+            {
+                "event_id": "amend-1",
+                "effective_date": "2023-02-01",
+                "event_type": "amendment",
+                "status": "verified",
+                "predecessors": [{"stable_id": "CUSIP:444444DD4", "amount": 800.0}],
+                "successors": [{"stable_id": "CUSIP:444444DD4", "amount": 790.0}],
+                "source_refs": ["s1"],
+            }
+        ]
+    }
+    graph = build_debt_lineage_graph(ledger, debt_lineage_events_from_dict(raw))
+    assert graph.root_instruments == ("CUSIP:444444DD4",)
+    assert graph.terminal_instruments == ("CUSIP:444444DD4",)
+
+
+def test_cross_id_exchange_cannot_repeat_same_stable_id_on_both_sides():
+    raw = exchange_event()
+    raw["events"][0]["successors"][0]["stable_id"] = "CUSIP:111111AA1"
+    with pytest.raises(ValueError, match="must be disjoint"):
+        debt_lineage_events_from_dict(raw)
+
+
+def test_redemption_with_successor_must_be_modelled_as_refinancing_or_exchange():
+    raw = exchange_event()
+    raw["events"][0]["event_type"] = "redemption"
+    with pytest.raises(ValueError, match="must not have successor"):
+        debt_lineage_events_from_dict(raw)
+
+
 def test_accounting_classification_requires_source_backed_basis():
     raw = exchange_event()
     raw["events"][0]["accounting"]["source_refs"] = []
@@ -208,10 +281,20 @@ def test_candidate_event_does_not_define_confirmed_roots_or_terminals():
     assert any("candidate-only" in warning for warning in graph.warnings)
 
 
-def test_participating_amount_cannot_exceed_observed_principal():
+def test_participating_amount_cannot_exceed_principal_observed_on_event_date():
     events = debt_lineage_events_from_dict(exchange_event(predecessor_amount=1_001.0))
-    with pytest.raises(ValueError, match="exceeds observed principal"):
-        build_debt_lineage_graph(exchange_ledger(), events)
+    with pytest.raises(ValueError, match="exceeds observed principal on event date"):
+        build_debt_lineage_graph(same_day_exchange_ledger(), events)
+
+
+def test_non_event_date_snapshot_is_not_false_hard_ceiling_for_event_amount():
+    graph = build_debt_lineage_graph(
+        exchange_ledger(),
+        debt_lineage_events_from_dict(exchange_event(successor_amount=600.0)),
+    )
+    impact = graph.impacts[0]
+    assert impact.successor_principal == 600.0
+    assert any("not used as a hard ceiling" in item for item in impact.unresolved)
 
 
 def test_source_validation_blocks_future_or_unknown_event_evidence():
@@ -219,6 +302,7 @@ def test_source_validation_blocks_future_or_unknown_event_evidence():
         source_packet(), exchange_event(), exchange_ledger()
     )
     assert valid.valid is True
+    assert any("observation date" in warning for warning in valid.warnings)
 
     future = validate_debt_lineage_events_against_source_packet(
         source_packet(analysis_date="2023-01-31"), exchange_event(), exchange_ledger()
@@ -244,6 +328,7 @@ def test_serialization_and_template_make_non_inference_boundary_explicit():
     payload = debt_lineage_graph_to_dict(graph)
     assert payload["semantics"]["accounting_treatment_is_auto_inferred"] is False
     assert payload["semantics"]["candidate_events_are_confirmed"] is False
+    assert payload["semantics"]["snapshot_principal_is_event_ceiling_only_on_same_date"] is True
     assert payload["events"][0]["effective_date"] == "2023-02-01"
 
     template = debt_lineage_event_template(ledger)
@@ -252,3 +337,4 @@ def test_serialization_and_template_make_non_inference_boundary_explicit():
         "CUSIP:222222BB2",
     }
     assert any("Do not merge old and new CUSIPs" in item for item in template["guardrails"])
+    assert any("not a hard ceiling" in item for item in template["guardrails"])
