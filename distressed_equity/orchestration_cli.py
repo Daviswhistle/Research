@@ -23,9 +23,7 @@ from .sec import SecClient, normalize_cik
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Build/resume a point-in-time distressed-equity research workspace"
-    )
+    parser = argparse.ArgumentParser(description="Build/resume a point-in-time distressed-equity research workspace")
     identity = parser.add_mutually_exclusive_group(required=True)
     identity.add_argument("--ticker")
     identity.add_argument("--cik")
@@ -43,47 +41,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--contract-search-max-filings", type=int, default=40)
     parser.add_argument("--contract-days-before-execution", type=int, default=30)
     parser.add_argument("--contract-days-after-execution", type=int, default=550)
-    parser.add_argument(
-        "--no-resolve-references",
-        action="store_true",
-        help="Do not follow incorporation-by-reference links to older SEC filings/exhibits",
-    )
-    parser.add_argument(
-        "--no-contract-identity-fallback",
-        action="store_true",
-        help="Do not reverse-search locator-less contract title + execution-date references",
-    )
-    parser.add_argument(
-        "--no-cross-cik",
-        action="store_true",
-        help="Do not follow explicit foreign-CIK SEC Archives/CIK references",
-    )
+    parser.add_argument("--no-resolve-references", action="store_true", help="Do not follow incorporation-by-reference links to older SEC filings/exhibits")
+    parser.add_argument("--no-contract-identity-fallback", action="store_true", help="Do not reverse-search locator-less contract title + execution-date references")
+    parser.add_argument("--no-cross-cik", action="store_true", help="Do not follow explicit foreign-CIK SEC Archives/CIK references")
     parser.add_argument("--market-provider", choices=("none", "alpha-vantage"), default="none")
     parser.add_argument("--alpha-vantage-key", help="Defaults to ALPHA_VANTAGE_API_KEY")
     parser.add_argument("--history-years", type=int, default=5)
-    parser.add_argument(
-        "--refresh",
-        action="store_true",
-        help="Rebuild the point-in-time packet even when research_packet.json already exists",
-    )
-    parser.add_argument(
-        "--result",
-        action="append",
-        default=[],
-        help="Structured agent-result JSON; repeat to ingest multiple results",
-    )
-    parser.add_argument(
-        "--debt-instruments",
-        help="Optional JSON containing verified filing-level debt instrument snapshots for stable-ID matching",
-    )
-    parser.add_argument(
-        "--debt-lineage",
-        help="Optional source-backed candidate debt lineage JSON; requires --debt-instruments",
-    )
-    parser.add_argument(
-        "--debt-lineage-verification",
-        help="Fingerprint-bound lineage verification JSON; requires --debt-lineage",
-    )
+    parser.add_argument("--refresh", action="store_true", help="Rebuild the point-in-time packet even when research_packet.json already exists")
+    parser.add_argument("--result", action="append", default=[], help="Structured agent-result JSON; repeat to ingest multiple results")
+    parser.add_argument("--debt-instruments", help="Optional JSON containing verified filing-level debt instrument snapshots for stable-ID matching")
+    parser.add_argument("--debt-lineage", help="Optional source-backed candidate debt lineage JSON; requires --debt-instruments")
+    parser.add_argument("--debt-lineage-verification", help="Fingerprint-bound lineage verification JSON; requires --debt-lineage")
     parser.add_argument("--allow-overwrite", action="store_true")
     parser.add_argument("--apply-low-confidence", action="store_true")
     return parser
@@ -110,36 +78,22 @@ def _load_json_any(path: str | Path) -> dict[str, Any] | list[dict[str, Any]]:
     return payload
 
 
-def _bundle_from_frozen_packet(
-    packet: dict[str, Any],
-    cutoff: date,
-    *,
-    requested_ticker: str | None = None,
-    requested_cik: str | None = None,
-) -> ResearchBundle:
+def _bundle_from_frozen_packet(packet: dict[str, Any], cutoff: date, *, requested_ticker: str | None = None, requested_cik: str | None = None) -> ResearchBundle:
     snapshot = packet.get("snapshot") or {}
     packet_date = str(snapshot.get("analysis_date") or "")[:10]
     if packet_date and packet_date != cutoff.isoformat():
-        raise ValueError(
-            f"workspace packet cutoff {packet_date} does not match requested {cutoff.isoformat()}; use --refresh intentionally"
-        )
-
+        raise ValueError(f"workspace packet cutoff {packet_date} does not match requested {cutoff.isoformat()}; use --refresh intentionally")
     frozen_ticker = str(snapshot.get("ticker") or "").strip().upper() or None
     frozen_cik_raw = snapshot.get("cik")
     frozen_cik = normalize_cik(frozen_cik_raw) if frozen_cik_raw else None
     if requested_ticker is not None:
         requested = requested_ticker.strip().upper()
         if frozen_ticker != requested:
-            raise ValueError(
-                f"workspace packet ticker {frozen_ticker or 'unknown'} does not match requested {requested}; use --refresh intentionally"
-            )
+            raise ValueError(f"workspace packet ticker {frozen_ticker or 'unknown'} does not match requested {requested}; use --refresh intentionally")
     if requested_cik is not None:
         requested = normalize_cik(requested_cik)
         if frozen_cik != requested:
-            raise ValueError(
-                f"workspace packet CIK {frozen_cik or 'unknown'} does not match requested {requested}; use --refresh intentionally"
-            )
-
+            raise ValueError(f"workspace packet CIK {frozen_cik or 'unknown'} does not match requested {requested}; use --refresh intentionally")
     return ResearchBundle(
         ticker=snapshot.get("ticker"),
         company_name=str(snapshot.get("company_name") or snapshot.get("cik") or "Unknown company"),
@@ -155,27 +109,29 @@ def _write_bundle_artifacts(workspace: Path, bundle: ResearchBundle) -> None:
     _write_json(workspace / "capital_stack.json", packet["capital_stack_packet"])
     _write_json(workspace / "capital_stack_diff.json", packet["capital_stack_diff"])
     _write_json(workspace / "tasks.json", {"tasks": packet["agent_tasks"]})
-    legal_name_graph = packet.get("legal_name_alias_graph")
-    if legal_name_graph is not None:
-        _write_json(workspace / "legal_name_alias_graph.json", legal_name_graph)
-    source_packet = packet.get("debt_instrument_source_packet")
-    if source_packet is not None:
-        _write_json(workspace / "debt_instrument_sources.json", source_packet)
-    graph = packet.get("source_document_graph")
-    if graph is not None:
-        _write_json(workspace / "source_document_graph.json", graph)
-    cross_graph = packet.get("cross_cik_graph")
-    if cross_graph is not None:
-        _write_json(workspace / "cross_cik_graph.json", cross_graph)
-    named_entity_graph = packet.get("named_entity_contract_graph")
-    if named_entity_graph is not None:
-        _write_json(workspace / "named_entity_contract_graph.json", named_entity_graph)
+    if packet.get("legal_name_alias_graph") is not None:
+        _write_json(workspace / "legal_name_alias_graph.json", packet["legal_name_alias_graph"])
+    if packet.get("debt_instrument_source_packet") is not None:
+        _write_json(workspace / "debt_instrument_sources.json", packet["debt_instrument_source_packet"])
+    if packet.get("source_document_graph") is not None:
+        _write_json(workspace / "source_document_graph.json", packet["source_document_graph"])
+    if packet.get("cross_cik_graph") is not None:
+        _write_json(workspace / "cross_cik_graph.json", packet["cross_cik_graph"])
+    if packet.get("named_entity_contract_graph") is not None:
+        _write_json(workspace / "named_entity_contract_graph.json", packet["named_entity_contract_graph"])
     verification = packet.get("debt_instrument_verification")
     if isinstance(verification, dict):
         _write_json(workspace / "debt_instrument_task.json", verification.get("task", {}))
         _write_json(workspace / "debt_instrument_template.json", verification.get("result_template", {}))
     if packet.get("market_snapshot") is not None:
         _write_json(workspace / "market_snapshot.json", packet["market_snapshot"])
+
+
+def _clear_stale_lineage_artifacts(workspace: Path) -> None:
+    for name in ("debt_lineage.json", "debt_lineage_verification_template.json"):
+        path = workspace / name
+        if path.exists():
+            path.unlink()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -189,20 +145,12 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--debt-lineage-verification requires --debt-lineage")
 
     if packet_path.exists() and not args.refresh:
-        bundle = _bundle_from_frozen_packet(
-            _load_json(packet_path),
-            cutoff,
-            requested_ticker=args.ticker,
-            requested_cik=args.cik,
-        )
+        bundle = _bundle_from_frozen_packet(_load_json(packet_path), cutoff, requested_ticker=args.ticker, requested_cik=args.cik)
     else:
         sec_client = SecClient(user_agent=args.user_agent)
         market_provider = None
         if args.market_provider == "alpha-vantage":
-            market_provider = AlphaVantageProvider(
-                api_key=args.alpha_vantage_key or os.getenv("ALPHA_VANTAGE_API_KEY")
-            )
-
+            market_provider = AlphaVantageProvider(api_key=args.alpha_vantage_key or os.getenv("ALPHA_VANTAGE_API_KEY"))
         bundle = build_research_bundle(
             sec_client,
             analysis_date=cutoff,
@@ -247,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
         debt_ledger_payload = debt_instrument_ledger_to_dict(debt_ledger)
         _write_json(workspace / "debt_instrument_ledger.json", debt_ledger_payload)
         _write_json(workspace / "debt_lineage_template.json", debt_lineage_event_template(debt_ledger))
+        if not args.debt_lineage:
+            _clear_stale_lineage_artifacts(workspace)
 
     if args.debt_lineage:
         if debt_ledger is None:
@@ -255,24 +205,15 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(source_packet, dict):
             raise ValueError("workspace debt lineage requires a frozen debt_instrument_source_packet")
         raw_lineage = _load_json_any(args.debt_lineage)
-        lineage_validation = validate_debt_lineage_events_against_source_packet(
-            source_packet,
-            raw_lineage,
-            debt_ledger,
-        )
+        lineage_validation = validate_debt_lineage_events_against_source_packet(source_packet, raw_lineage, debt_ledger)
         if not lineage_validation.valid:
-            raise ValueError(
-                "invalid source-backed debt lineage events: " + "; ".join(lineage_validation.errors)
-            )
+            raise ValueError("invalid source-backed debt lineage events: " + "; ".join(lineage_validation.errors))
         debt_lineage_validation_warnings = lineage_validation.warnings
         events = lineage_validation.events
         verification_template = debt_lineage_verification_template(events)
         _write_json(workspace / "debt_lineage_verification_template.json", verification_template)
         if args.debt_lineage_verification:
-            events = promote_verified_debt_lineage_events(
-                events,
-                _load_json(args.debt_lineage_verification),
-            )
+            events = promote_verified_debt_lineage_events(events, _load_json(args.debt_lineage_verification))
         lineage = build_debt_lineage_graph(debt_ledger, events)
         debt_lineage_payload = debt_lineage_graph_to_dict(lineage)
         _write_json(workspace / "debt_lineage.json", debt_lineage_payload)
@@ -280,12 +221,7 @@ def main(argv: list[str] | None = None) -> int:
     merged = None
     if args.result:
         raw_results = [_load_json(path) for path in args.result]
-        merged = ingest_research_bundle(
-            bundle,
-            raw_results,
-            allow_overwrite=args.allow_overwrite,
-            apply_low_confidence=args.apply_low_confidence,
-        )
+        merged = ingest_research_bundle(bundle, raw_results, allow_overwrite=args.allow_overwrite, apply_low_confidence=args.apply_low_confidence)
         if debt_ledger_payload is not None:
             merged["debt_instrument_ledger"] = debt_ledger_payload
         if debt_lineage_payload is not None:
@@ -308,11 +244,7 @@ def main(argv: list[str] | None = None) -> int:
         impacts = debt_lineage_payload["impacts"]
         verified = sum(1 for event in events if event["status"] == "verified")
         candidates = sum(1 for event in events if event["status"] == "candidate")
-        explicit_accounting = sum(
-            1
-            for impact in impacts
-            if impact["accounting_treatment"] not in {"undetermined", "not_applicable"}
-        )
+        explicit_accounting = sum(1 for impact in impacts if impact["accounting_treatment"] not in {"undetermined", "not_applicable"})
         summary += (
             "\n## Debt exchange / modification lineage\n\n"
             f"- Events: {len(events)} (verified {verified}, candidate {candidates})\n"
