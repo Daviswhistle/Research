@@ -32,6 +32,21 @@ from .source_outcomes import (
     compare_source_outcome_base_rates,
     source_outcome_base_rate_to_dict,
 )
+from .survival_features import (
+    CsvSurvivalFeatureIndex,
+    FeatureStrataComparison,
+    compare_feature_strata_base_rates,
+    feature_strata_to_dict,
+)
+
+
+_DEFAULT_FEATURE_DIMENSIONS = (
+    "liquidity_runway",
+    "nearest_maturity",
+    "covenant_headroom",
+    "net_leverage",
+    "impairment_type",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--outcome-cutoff",
         help=(
             "Optional YYYY-MM-DD date through which later data may be used for outcome analysis. "
-            "It gates both market-observable +12m/+3y outcomes and any source-backed legal/business labels."
+            "It gates both market-observable +12m/+3y outcomes and source-backed legal/business labels."
         ),
     )
     parser.add_argument(
@@ -73,6 +88,21 @@ def build_parser() -> argparse.ArgumentParser:
             "are excluded by outcome_known_date."
         ),
     )
+    parser.add_argument(
+        "--survival-features-csv",
+        help=(
+            "Optional verified T0 survival feature snapshots. Requires --source-outcomes-csv and --outcome-cutoff; "
+            "evidence_known_date must be on or before each T0 analysis date."
+        ),
+    )
+    parser.add_argument(
+        "--feature-strata-dimensions",
+        default=",".join(_DEFAULT_FEATURE_DIMENSIONS),
+        help=(
+            "Comma-separated T0 dimensions: liquidity_runway,nearest_maturity,covenant_headroom,"
+            "net_leverage,impairment_type"
+        ),
+    )
     parser.add_argument("--output", "-o", help="JSON output; stdout when omitted")
     parser.add_argument("--markdown-output", help="Optional human-readable cohort summary")
     return parser
@@ -86,11 +116,19 @@ def _mult(value: float | None) -> str:
     return "—" if value is None else f"{value:.2f}x"
 
 
+def _feature_dimensions(raw: str) -> tuple[str, ...]:
+    values = tuple(item.strip() for item in raw.split(",") if item.strip())
+    if not values:
+        raise ValueError("--feature-strata-dimensions must contain at least one dimension")
+    return values
+
+
 def _markdown(
     run: JointReplayRun,
     outcomes: MarketOutcomeCohort | None = None,
     base_rates: MarketOutcomeBaseRateComparison | None = None,
     source_base_rates: SourceOutcomeBaseRateComparison | None = None,
+    feature_strata: FeatureStrataComparison | None = None,
 ) -> str:
     lines = [
         f"# Joint equity / credit distress replay — {run.analysis_date.isoformat()}",
@@ -192,6 +230,29 @@ def _markdown(
             "> Legal/business rates use only rows marked verified with non-empty evidence refs, verifier metadata, reopened evidence, and outcome_known_date at or before the knowledge cutoff. Missing labels stay missing; they are not counted as failures.",
             "",
         ])
+
+    if feature_strata is not None:
+        lines.extend([
+            "## T0 survival-feature strata",
+            "",
+            f"- verified T0 feature snapshots in cohort: **{feature_strata.feature_snapshot_count:,}/{feature_strata.cohort_case_count:,}**",
+            f"- source-backed outcome labels known by cutoff: **{feature_strata.known_source_label_count:,}**",
+            "",
+            "| Dimension | Bucket | Credit group | Cohort | Feature rows | Outcome labels | Company survives 12m | Existing common survives 12m | Normalizes ≤3y | 3x ≤3y |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        ])
+        for item in feature_strata.strata:
+            lines.append(
+                f"| {item.dimension} | {item.bucket} | {item.credit_group} | {item.cohort_case_count} | "
+                f"{item.feature_snapshot_count} | {item.source_labeled_case_count} | {_pct(item.survived_12m_rate)} | "
+                f"{_pct(item.existing_common_survival_rate)} | {_pct(item.normalized_within_3y_rate)} | "
+                f"{_pct(item.three_x_3y_rate)} |"
+            )
+        lines.extend([
+            "",
+            "> Feature buckets are descriptive strata, not universal causal thresholds. Only verified T0 values with evidence_known_date on or before the analysis date are admitted; unknown features remain explicit unknown buckets.",
+            "",
+        ])
     return "\n".join(lines)
 
 
@@ -199,6 +260,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.source_outcomes_csv and not args.outcome_cutoff:
         raise ValueError("--source-outcomes-csv requires --outcome-cutoff as the outcome knowledge boundary")
+    if args.survival_features_csv and not args.source_outcomes_csv:
+        raise ValueError("--survival-features-csv requires --source-outcomes-csv for source-backed outcome strata")
+    if args.survival_features_csv and not args.outcome_cutoff:
+        raise ValueError("--survival-features-csv requires --outcome-cutoff as the outcome knowledge boundary")
 
     cutoff = date.fromisoformat(args.analysis_date)
     equity_provider = CsvMarketProvider(args.securities_csv, args.prices_csv)
@@ -231,6 +296,8 @@ def main(argv: list[str] | None = None) -> int:
     outcomes = None
     base_rates = None
     source_base_rates = None
+    feature_strata = None
+    source_index = None
     payload = joint_replay_to_dict(joint)
     outcome_cutoff = None
     if args.outcome_cutoff:
@@ -251,6 +318,18 @@ def main(argv: list[str] | None = None) -> int:
         source_base_rates = compare_source_outcome_base_rates(joint, source_index, outcome_cutoff)
         payload["source_outcome_base_rates"] = source_outcome_base_rate_to_dict(source_base_rates)
 
+    if args.survival_features_csv:
+        assert outcome_cutoff is not None and source_index is not None
+        feature_index = CsvSurvivalFeatureIndex(args.survival_features_csv)
+        feature_strata = compare_feature_strata_base_rates(
+            joint,
+            feature_index,
+            source_index,
+            outcome_cutoff,
+            dimensions=_feature_dimensions(args.feature_strata_dimensions),
+        )
+        payload["feature_strata_base_rates"] = feature_strata_to_dict(feature_strata)
+
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
         target = Path(args.output)
@@ -261,7 +340,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.markdown_output:
         target = Path(args.markdown_output)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(_markdown(joint, outcomes, base_rates, source_base_rates), encoding="utf-8")
+        target.write_text(
+            _markdown(joint, outcomes, base_rates, source_base_rates, feature_strata),
+            encoding="utf-8",
+        )
     return 0
 
 
