@@ -165,7 +165,7 @@ def test_walk_forward_prior_uses_only_historical_known_outcomes_and_deduped_epis
         _outcome("A", "A", date(2018, 12, 31), date(2021, 12, 31), survived=True, common=True, normalized=True, multiple="4"),
         # Duplicate A-2019 exists in raw historical runs but its entire episode is collapsed before calibration.
         _outcome("A", "A", date(2019, 12, 31), date(2022, 1, 31), survived=False, common=False, normalized=False, multiple=""),
-        _outcome("B", "B", date(2019, 12, 31), date(2021, 12, 31), survived=False, common=False, normalized=False, multiple="0.5"),
+        _outcome("B", "B", date(2019, 12, 31), date(2021, 12, 31), survived=False, common=False, normalized=False, multiple=""),
         _outcome("X", "X", date(2021, 12, 31), date(2022, 12, 31), survived=False, common=False, normalized=False, multiple=""),
     ])
 
