@@ -4,10 +4,13 @@ import re
 from typing import Any
 
 from . import complex_native_pdf_debt_extraction as _complex_native_pdf
+from . import debt_instruments as _debt_instruments
+from . import debt_lineage as _debt_lineage
 from . import native_pdf_debt_extraction as _native_pdf
 from . import sec_instruments
 from .complex_native_pdf_debt_extraction import install_complex_native_pdf_extraction
 from .complex_table_debt_extraction import install_complex_table_extraction
+from .debt_pipeline_hardening import install_debt_pipeline_hardening
 from .native_pdf_complex_hardening import install_complex_native_pdf_hardening
 from .native_pdf_debt_extraction import (
     _MIN_NATIVE_FRAGMENTS,
@@ -169,6 +172,7 @@ def install_document_aware_extraction(module: Any) -> None:
         return
 
     install_complex_table_extraction(module)
+    install_debt_pipeline_hardening(module, _debt_instruments, _debt_lineage)
     # The native-PDF packet builder installed immediately before this function uses
     # the native module's global extractor at runtime, so patching the module here
     # upgrades both initial SEC-packet PDFs and later source-graph PDFs.
