@@ -7,10 +7,8 @@ def write_json(path, payload):
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def test_research_workspace_writes_lineage_template_and_verified_graph(tmp_path):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    packet = {
+def workspace_packet():
+    return {
         "snapshot": {
             "ticker": "TEST",
             "cik": "0000000001",
@@ -51,9 +49,10 @@ def test_research_workspace_writes_lineage_template_and_verified_graph(tmp_path)
             ],
         },
     }
-    write_json(workspace / "research_packet.json", packet)
 
-    instruments = {
+
+def instruments_payload():
+    return {
         "instruments": [
             {
                 "as_of_date": "2023-01-01",
@@ -77,16 +76,16 @@ def test_research_workspace_writes_lineage_template_and_verified_graph(tmp_path)
             },
         ]
     }
-    instruments_path = tmp_path / "instruments.json"
-    write_json(instruments_path, instruments)
 
-    events = {
+
+def events_payload():
+    return {
         "events": [
             {
                 "event_id": "exchange-1",
                 "effective_date": "2023-02-01",
                 "event_type": "exchange",
-                "status": "verified",
+                "status": "candidate",
                 "predecessors": [
                     {"stable_id": "CUSIP:111111AA1", "amount": 600.0}
                 ],
@@ -103,24 +102,31 @@ def test_research_workspace_writes_lineage_template_and_verified_graph(tmp_path)
             }
         ]
     }
-    events_path = tmp_path / "events.json"
-    write_json(events_path, events)
 
-    exit_code = main(
-        [
-            "--ticker",
-            "TEST",
-            "--analysis-date",
-            "2023-12-31",
-            "--workspace",
-            str(workspace),
-            "--debt-instruments",
-            str(instruments_path),
-            "--debt-lineage",
-            str(events_path),
-        ]
-    )
-    assert exit_code == 0
+
+def test_research_workspace_requires_verification_before_confirming_lineage(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    write_json(workspace / "research_packet.json", workspace_packet())
+
+    instruments_path = tmp_path / "instruments.json"
+    events_path = tmp_path / "events.json"
+    write_json(instruments_path, instruments_payload())
+    write_json(events_path, events_payload())
+
+    base_args = [
+        "--ticker",
+        "TEST",
+        "--analysis-date",
+        "2023-12-31",
+        "--workspace",
+        str(workspace),
+        "--debt-instruments",
+        str(instruments_path),
+        "--debt-lineage",
+        str(events_path),
+    ]
+    assert main(base_args) == 0
 
     template = json.loads((workspace / "debt_lineage_template.json").read_text(encoding="utf-8"))
     assert set(template["available_stable_ids"]) == {
@@ -128,36 +134,46 @@ def test_research_workspace_writes_lineage_template_and_verified_graph(tmp_path)
         "CUSIP:222222BB2",
     }
 
+    candidate_lineage = json.loads((workspace / "debt_lineage.json").read_text(encoding="utf-8"))
+    assert candidate_lineage["events"][0]["status"] == "candidate"
+    assert candidate_lineage["root_instruments"] == []
+    assert candidate_lineage["terminal_instruments"] == []
+
+    verification_path = workspace / "debt_lineage_verification_template.json"
+    verification = json.loads(verification_path.read_text(encoding="utf-8"))
+    review = verification["event_reviews"][0]
+    review.update(
+        {
+            "status": "verified",
+            "verifier": "workspace-reviewer",
+            "verified_on": "2026-09-16",
+            "evidence_reopened": True,
+        }
+    )
+    approved_path = tmp_path / "lineage_verification.json"
+    write_json(approved_path, verification)
+
+    assert main(base_args + ["--debt-lineage-verification", str(approved_path)]) == 0
+
     lineage = json.loads((workspace / "debt_lineage.json").read_text(encoding="utf-8"))
     assert lineage["events"][0]["status"] == "verified"
+    assert lineage["events"][0]["verified_by"] == "workspace-reviewer"
     assert lineage["impacts"][0]["principal_delta"] == -50.0
     assert "nearest_maturity_extended" in lineage["impacts"][0]["signals"]
+    assert lineage["root_instruments"] == ["CUSIP:111111AA1"]
+    assert lineage["terminal_instruments"] == ["CUSIP:222222BB2"]
 
     summary = (workspace / "summary.md").read_text(encoding="utf-8")
     assert "Debt exchange / modification lineage" in summary
     assert "verified 1" in summary
+    assert "Verification template" in summary
 
 
 def test_research_workspace_refuses_lineage_without_debt_instruments(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    packet = {
-        "snapshot": {
-            "ticker": "TEST",
-            "cik": "0000000001",
-            "company_name": "Test Co",
-            "analysis_date": "2023-12-31",
-            "warnings": [],
-        },
-        "screening_draft": {
-            "screening_candidate_draft": {
-                "capital_structure": {"current_price": None}
-            }
-        },
-        "capital_stack_packet": {"snippets": []},
-        "capital_stack_diff": {"changes": []},
-        "debt_instrument_source_packet": {"analysis_date": "2023-12-31", "spans": []},
-    }
+    packet = workspace_packet()
+    packet["debt_instrument_source_packet"] = {"analysis_date": "2023-12-31", "spans": []}
     write_json(workspace / "research_packet.json", packet)
     events_path = tmp_path / "events.json"
     write_json(events_path, {"events": []})
@@ -179,3 +195,29 @@ def test_research_workspace_refuses_lineage_without_debt_instruments(tmp_path):
         assert "requires --debt-instruments" in str(exc)
     else:
         raise AssertionError("expected --debt-lineage without --debt-instruments to fail")
+
+
+def test_research_workspace_refuses_verification_without_lineage(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    write_json(workspace / "research_packet.json", workspace_packet())
+    verification_path = tmp_path / "verification.json"
+    write_json(verification_path, {"schema_version": "1", "event_reviews": []})
+
+    try:
+        main(
+            [
+                "--ticker",
+                "TEST",
+                "--analysis-date",
+                "2023-12-31",
+                "--workspace",
+                str(workspace),
+                "--debt-lineage-verification",
+                str(verification_path),
+            ]
+        )
+    except ValueError as exc:
+        assert "requires --debt-lineage" in str(exc)
+    else:
+        raise AssertionError("expected verification without lineage to fail")
