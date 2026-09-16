@@ -69,11 +69,25 @@ def test_population_coverage_cli_exposes_missing_credit_outcome_feature_and_eval
         "--bond-observations-csv", str(bonds),
         "--source-outcomes-csv", str(outcomes),
         "--survival-features-csv", str(features),
+        "--code-revision", "test-rev",
         "--output", str(output),
         "--markdown-output", str(markdown),
     ]) == 0
 
     payload = json.loads(output.read_text(encoding="utf-8"))
+    manifest = payload["experiment_manifest"]
+    assert manifest["pipeline"] == "population_coverage"
+    assert manifest["code_revision"] == "test-rev"
+    assert manifest["code_revision_source"] == "explicit"
+    assert manifest["reproducibility_complete"] is True
+    assert len(manifest["data_config_fingerprint"]) == 64
+    assert len(manifest["experiment_fingerprint"]) == 64
+    assert {item["role"] for item in manifest["input_files"]} == {
+        "securities", "prices", "credit_links", "bond_observations", "source_outcomes", "survival_features"
+    }
+    assert manifest["config"]["analysis_dates"] == ["2018-12-31", "2020-12-31"]
+    assert manifest["config"]["outcome_coverage_cutoff"] == "2022-12-31"
+
     assert payload["analysis_dates"] == ["2018-12-31", "2020-12-31"]
     assert payload["total_case_observations"] == 2
     assert payload["unique_security_count"] == 2
@@ -162,6 +176,8 @@ def test_population_coverage_cli_exposes_missing_credit_outcome_feature_and_eval
 
     summary = markdown.read_text(encoding="utf-8")
     assert "Historical distress population coverage" in summary
+    assert "experiment fingerprint" in summary
+    assert manifest["experiment_fingerprint"] in summary
     assert "Market evaluability" in summary
     assert "Evaluable non-candidate" in summary
     assert "Right-censored" in summary
