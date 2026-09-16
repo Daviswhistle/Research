@@ -2,77 +2,122 @@
 
 ## 목적
 
-Debt exhibit의 구조가 명확할 때는 그 구조를 보존해 deterministic extraction을 한다. 구조가 불확실한 visual source는 모든 내용을 먼저 OCR/JSON화하지 않고 multimodal model이 원본을 직접 읽는다.
+Debt exhibit가 실제로 제공하는 구조를 최대한 보존해 deterministic extraction을 한다. 반대로 구조가 불명확한 scanned/image source를 억지로 OCR table로 바꾸지는 않는다.
 
 ```text
-HTML table      -> DOM row / column 구조 보존
-native-text PDF -> text-matrix x/y 구조 보존
+HTML table      -> DOM + rowspan/colspan + orientation
+native-text PDF -> pypdf text-matrix x/y + orientation
 scanned/image   -> multimodal source reader
 ```
 
-구조화 자체가 목적이 아니라 **투자 판단에 필요한 사실을 정확하게 알아내고, 계산에 필요한 최소 필드만 마지막에 코드와 연결하는 것**이 목적이다.
+목표는 표를 전부 JSON화하는 것이 아니라 **투자 판단에 필요한 debt facts를 다른 instrument와 섞지 않고 source-backed candidate로 만드는 것**이다.
 
-## HTML table path
+## HTML table: 세 가지 deterministic shape
 
-`structured_debt_extraction.py`는 table body를 prose path와 분리한다.
-
-```text
-SEC exhibit HTML
--> top-level table parser
--> rowspan / colspan expansion
--> semantic header mapping
--> one data row = one source span
--> same-row deterministic proposals
--> remaining prose만 distant-span extractor로 전달
-```
-
-Source ref:
+### 1. Ordinary row-oriented table
 
 ```text
-<accession>:<sequence>:t<table_index>:r<row_index>
+Instrument | Principal | Maturity | Coupon | CUSIP
+Note A     | 500       | 2028     | 5.25%  | ...
 ```
-
-Candidate provenance:
 
 ```text
 cluster_status = table_row
-cluster_basis = [same_html_table_row, header_mapped_columns]
+cluster_basis  = [same_html_table_row, header_mapped_columns]
 ```
 
-다른 row의 principal/CUSIP/maturity를 자동 결합하지 않는다.
+### 2. Multi-row / spanning instrument
 
-## Native-text PDF path
-
-PDF는 binary bytes로 읽고 `pypdf` text matrix의 page/x/y를 보존한다.
+한 instrument가 `rowspan` 또는 blank-name continuation row로 여러 행에 걸칠 수 있다.
 
 ```text
-PDF bytes
--> positioned text fragments
--> visual rows
--> x-axis header anchors
--> same-layout-row candidates
+Term Loan B | 800 | SOFR + 3.25% |          | CUSIP
+            |     |              | 2028-12-15 |
 ```
 
-Source ref:
+Parser는 DOM cell origin을 추적해서 다음 경우만 하나로 묶는다.
+
+- 동일 name cell이 `rowspan`으로 이어진 경우
+- 첫 행에 explicit instrument identity가 있고 바로 다음 행의 name column이 비어 있으며 material term만 이어지는 경우
 
 ```text
-<accession>:<sequence>:p<page>:r<row>
+cluster_status = table_row_group
+cluster_basis  = [
+  contiguous_html_table_rows,
+  shared_or_inherited_instrument_identity,
+  header_mapped_columns
+]
 ```
 
-Candidate provenance:
+서로 다른 행에서 같은 field가 상충하면 합산하거나 임의 선택하지 않는다. 예를 들어 principal 500 / 400이 동시에 붙으면 snapshot `principal`은 `null`로 남고 conflict warning이 생성된다.
+
+### 3. Transposed table
 
 ```text
-cluster_status = pdf_layout_row
-cluster_basis = [same_native_pdf_layout_row, coordinate_mapped_columns, pypdf_text_matrix]
+Term                  | Note A | Note B
+Principal ($ millions)| 500    | 400
+Maturity              | 2028   | 2030
+Coupon                | 5.25%  | 6.00%
+CUSIP                 | ...    | ...
 ```
 
-Table이 아닌 native PDF prose는 page-local coordinate order로 처리한다.
+첫 column이 field label이고 각 뒤 column이 instrument일 때 column 단위 candidate를 만든다.
 
-자세한 규칙은 [`NATIVE_PDF_DEBT_EXTRACTION.md`](NATIVE_PDF_DEBT_EXTRACTION.md)를 참고한다.
+```text
+cluster_status = table_column
+cluster_basis  = [
+  transposed_html_table,
+  field_labels_in_first_column,
+  same_html_table_column
+]
+```
 
-## Supported deterministic semantics
+`Senior Secured Notes`처럼 instrument title 안에 `secured` 등의 semantic token이 있어도 전체 title identity가 더 구체적이면 instrument header로 취급한다.
 
-HTML/PDF structured paths는 다음 field 계열을 지원한다.
+## Footnote-aware parsing
+
+HTML `<sup>` marker를 숫자와 붙인 채 버리지 않는다.
+
+```html
+<td>500<sup>1</sup></td>
+```
+
+은 deterministic parsing에서 amount `500`과 marker `1`을 분리한다. 같은 table 또는 문서 주변에 marker의 유일한 definition이 있으면 별도 source span으로 candidate에 연결한다.
+
+```text
+TABLE FOOTNOTE | marker=1 | ...
+DOCUMENT FOOTNOTE | marker=1 | ...
+```
+
+Footnote는 자동으로 숫자를 수정하는 rule이 아니다. Candidate warning에 “linked footnote를 검토해야 한다”는 경계를 남기고 authoritative snapshot 승격 전 reviewer가 evidence를 다시 연다.
+
+Marker definition이 없거나 여러 개로 모호하면 자동 연결하지 않고 unresolved warning으로 남긴다.
+
+## Aggregate / false candidate 방지
+
+다음 행은 instrument로 승격하지 않는다.
+
+```text
+Total debt
+Subtotal
+Aggregate
+```
+
+Footnote-only row도 data row가 아니다. `<th scope="row">`를 사용한 실제 instrument body row는 header row로 오인하지 않도록 semantic-header density를 함께 본다.
+
+## Native-text PDF
+
+PDF는 binary bytes와 pypdf text matrix를 사용하며 HTML과 같은 세 종류의 구조를 지원한다.
+
+```text
+pdf_layout_row
+pdf_layout_row_group
+pdf_layout_column
+```
+
+자세한 좌표 규칙과 sparse-native-text guard는 [`NATIVE_PDF_DEBT_EXTRACTION.md`](NATIVE_PDF_DEBT_EXTRACTION.md)를 참고한다.
+
+## Supported field semantics
 
 - instrument / debt / security / facility / loan
 - principal / face amount / outstanding
@@ -83,78 +128,44 @@ HTML/PDF structured paths는 다음 field 계열을 지원한다.
 - CUSIP / ISIN
 - seniority / secured / currency
 
-Header unit이 명확하면 millions/billions/thousands를 amount에 적용한다.
+Header에 millions / billions / thousands 단위가 명확하면 amount scale에 반영한다.
 
 ## Visual-source boundary
 
-Native text가 없는 PDF, image file, image-heavy HTML은 deterministic extractor가 억지로 처리하지 않는다.
+다음은 deterministic table parser가 확정하려 하지 않는다.
+
+- native text가 없는 scanned PDF
+- image file / image-heavy HTML
+- rotated/skewed 또는 좌표가 실질적으로 깨진 PDF
+- 시각적 병합관계가 text matrix에 보존되지 않은 표
+- 여러 페이지/별도 exhibit를 인간적 시각문맥으로 합쳐야만 이해되는 구조
+
+이 경우:
 
 ```text
 VISUAL_EXTRACTION_REQUIRED|...
 ```
 
-이 warning은 이제 “다음 OCR pipeline에 넣으라”는 뜻이 아니다. Frozen source packet serializer가 해당 document에 대해 `multimodal_source_reading` task를 자동 생성한다.
-
-Task strategy:
+으로 multimodal source reader에 넘긴다. 기본 경로는 전체 OCR/JSON 변환이 아니라:
 
 ```text
-read_source_first_structure_on_demand
+source understanding
+-> material finding
+-> exact evidence
+-> investment implication
+-> 필요한 최소 field만 structure-on-demand
 ```
 
-Multimodal model은 원본 page/image를 직접 읽고:
-
-1. material finding을 만든다.
-2. page/visual-region evidence를 남긴다.
-3. surrounding text/footnote/definition/cross-reference를 같이 고려한다.
-4. investment/survival implication을 설명한다.
-5. deterministic engine 계산에 정말 필요한 field만 선택적으로 구조화한다.
-
-전체 table의 모든 row/cell을 JSON으로 전환하는 것은 기본 계약이 아니다.
-
-자세한 내용은 [`MULTIMODAL_SOURCE_READER.md`](MULTIMODAL_SOURCE_READER.md)를 참고한다.
-
-## 왜 두 경로를 나누는가
-
-Deterministic structure가 실제 source에 존재하면 코드가 잘한다.
-
-- HTML DOM table
-- native PDF text matrix
-- explicit labels / identifiers
-
-반대로 visual source의 의미가 다음 요소에 의존하면 LLM이 원본 문맥을 먼저 보는 편이 낫다.
-
-- footnote
-- proviso / exception
-- amendment wording
-- cross-reference
-- borrower/guarantor scope
-- 표 밖 정의
-- 복잡한 visual grouping
-
-따라서 원칙은:
-
-```text
-source-provided structure -> deterministic extraction
-source-understanding needed -> multimodal reading
-engine arithmetic needed   -> minimal structure on demand
-```
+이다.
 
 ## Verification boundary
 
-어느 경로든 authoritative debt row로 바로 승격하지 않는다.
+Deterministic candidate도 authoritative debt row가 아니다.
 
-- deterministic candidate는 source ref를 다시 확인한다.
-- multimodal finding은 page/region evidence를 다시 확인한다.
-- ambiguous number/column은 unresolved로 남긴다.
-- model confidence만으로 patch를 확정하지 않는다.
-- engine patch는 source-backed material finding에 필요한 최소 범위여야 한다.
+- exact source refs를 다시 연다.
+- linked footnote를 같이 확인한다.
+- ambiguous/conflicting field는 null로 남긴다.
+- model confidence나 parser confidence만으로 stable ledger에 넣지 않는다.
+- frozen source packet을 사용하는 stable-ledger ingestion은 explicit reviewer verification을 요구한다.
 
-## 현재 제한
-
-- transposed / 복잡한 spanning table
-- footnote-heavy visual table
-- rotated/skewed PDF layout
-- multimodal model invocation runner는 아직 provider adapter가 필요함
-- separate exhibits 사이의 visual evidence 자동 merge는 하지 않음
-
-핵심 원칙은 **원본을 먼저 이해하고, 구조화는 계산이 필요할 때만 한다**는 것이다.
+핵심 원칙은 **source 구조가 명확한 곳까지만 deterministic하게 결합하고, 그 경계를 넘는 순간 추측하지 않는 것**이다.
