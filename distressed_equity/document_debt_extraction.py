@@ -3,10 +3,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from . import complex_native_pdf_debt_extraction as _complex_native_pdf
 from . import native_pdf_debt_extraction as _native_pdf
 from . import sec_instruments
 from .complex_native_pdf_debt_extraction import install_complex_native_pdf_extraction
 from .complex_table_debt_extraction import install_complex_table_extraction
+from .native_pdf_complex_hardening import install_complex_native_pdf_hardening
 from .native_pdf_debt_extraction import (
     _MIN_NATIVE_FRAGMENTS,
     _MIN_NATIVE_TEXT_CHARS,
@@ -165,6 +167,7 @@ def install_document_aware_extraction(module: Any) -> None:
     # the native module's global extractor at runtime, so patching the module here
     # upgrades both initial SEC-packet PDFs and later source-graph PDFs.
     install_complex_native_pdf_extraction(_native_pdf)
+    install_complex_native_pdf_hardening(_complex_native_pdf)
 
     original_get_text = module._get_text
     original_extract = module.extract_source_candidates
