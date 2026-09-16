@@ -13,6 +13,7 @@ from .calibration_stability import (
 from .credit_replay import CreditReplayConfig, CsvCreditIdentityIndex, JointReplayRun, run_joint_credit_replay
 from .csv_bond_market import CsvBondMarketProvider
 from .csv_market import CsvMarketProvider
+from .experiment_manifest import build_experiment_manifest, experiment_manifest_to_dict
 from .prior_calibration import PriorCalibrationReport, evaluate_walk_forward_priors, prior_calibration_to_dict
 from .replay import DistressScanConfig, run_historical_replay
 from .source_outcomes import CsvSourceBackedOutcomeIndex
@@ -94,6 +95,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.10,
         help="Reliability-bin width; must divide 1 exactly",
     )
+    parser.add_argument(
+        "--code-revision",
+        help="Optional exact code revision for reproducibility; otherwise GITHUB_SHA then local git HEAD are attempted",
+    )
     parser.add_argument("--output", "-o", help="JSON output; stdout when omitted")
     parser.add_argument("--markdown-output", help="Optional human-readable calibration summary")
     return parser
@@ -111,6 +116,34 @@ def _dimensions(raw: str, *, option: str) -> tuple[str, ...]:
     if not values:
         raise ValueError(f"{option} must contain at least one dimension")
     return values
+
+
+def _manifest_config(
+    args: argparse.Namespace,
+    analysis_dates: tuple[date, ...],
+    evaluation_cutoff: date,
+    feature_dimensions: tuple[str, ...],
+    stability_dimensions: tuple[str, ...],
+) -> dict[str, object]:
+    return {
+        "analysis_dates": [item.isoformat() for item in analysis_dates],
+        "evaluation_cutoff": evaluation_cutoff.isoformat(),
+        "exchanges": sorted(set(args.exchange)),
+        "min_drawdown": args.min_drawdown,
+        "min_price": args.min_price,
+        "lookback_years": args.lookback_years,
+        "max_securities": args.max_securities,
+        "credit_lookback_days": args.credit_lookback_days,
+        "credit_max_staleness_days": args.credit_max_staleness_days,
+        "credit_price_below": args.credit_price_below,
+        "credit_yield_at_or_above": args.credit_yield_at_or_above,
+        "credit_spread_at_or_above": args.credit_spread_at_or_above,
+        "feature_dimensions": list(feature_dimensions),
+        "stability_dimensions": list(stability_dimensions),
+        "episode_gap_days": args.episode_gap_days,
+        "small_sample_n": args.small_sample_n,
+        "calibration_bin_width": args.calibration_bin_width,
+    }
 
 
 def _joint_run(
@@ -143,13 +176,18 @@ def _fmt_float(value: float | None, digits: int = 4) -> str:
 def _markdown(
     report: PriorCalibrationReport,
     stability: CalibrationStabilityReport,
+    manifest: dict[str, object],
     *,
     analysis_dates: tuple[date, ...],
     prior_runs: tuple[WalkForwardPriorRun, ...],
 ) -> str:
+    experiment_id = manifest.get("experiment_fingerprint") or "unavailable (code revision unresolved)"
     lines = [
         f"# Walk-forward prior calibration — evaluated through {report.evaluation_cutoff.isoformat()}",
         "",
+        f"- experiment fingerprint: **{experiment_id}**",
+        f"- data/config fingerprint: **{manifest['data_config_fingerprint']}**",
+        f"- code revision: **{manifest.get('code_revision') or 'unresolved'}**",
         f"- replay grid: **{', '.join(item.isoformat() for item in analysis_dates)}**",
         f"- walk-forward prior runs: **{report.prior_run_count:,}**",
         f"- target cases across prior runs: **{report.target_case_count:,}**",
@@ -203,15 +241,18 @@ def _markdown(
             f"{_fmt_pct(item.observed_rate)} | {_fmt_pct(item.calibration_gap)} | {_fmt_float(item.brier_score)} | {median_n} |"
         )
 
-    if report.warnings or stability.warnings:
+    manifest_warnings = manifest.get("warnings")
+    warnings = list(report.warnings) + list(stability.warnings)
+    if isinstance(manifest_warnings, list):
+        warnings.extend(str(item) for item in manifest_warnings)
+    if warnings:
         lines.extend(["", "## Warnings", ""])
-        lines.extend(f"- {warning}" for warning in report.warnings)
-        lines.extend(f"- {warning}" for warning in stability.warnings)
+        lines.extend(f"- {warning}" for warning in warnings)
         lines.append("")
 
     lines.extend(
         [
-            "> Each basis is a separate forecast family. Credit-group, liquidity, maturity, covenant, leverage, and impairment priors overlap and are not averaged into one synthetic probability. Stability slices only regroup already-realized OOS forecasts; they do not refit or alter probabilities. Calendar slices are descriptive dates/years, not automatically named economic regimes.",
+            "> Each basis is a separate forecast family. Credit-group, liquidity, maturity, covenant, leverage, and impairment priors overlap and are not averaged into one synthetic probability. Stability slices only regroup already-realized OOS forecasts; they do not refit or alter probabilities. Calendar slices are descriptive dates/years, not automatically named economic regimes. The experiment fingerprint binds input bytes, normalized config, and code revision; file-system paths do not affect experiment identity.",
             "",
         ]
     )
@@ -224,6 +265,26 @@ def main(argv: list[str] | None = None) -> int:
     evaluation_cutoff = date.fromisoformat(args.evaluation_cutoff)
     feature_dimensions = _dimensions(args.feature_dimensions, option="--feature-dimensions")
     stability_dimensions = _dimensions(args.stability_dimensions, option="--stability-dimensions")
+
+    manifest = build_experiment_manifest(
+        pipeline="prior_calibration",
+        input_files={
+            "securities": args.securities_csv,
+            "prices": args.prices_csv,
+            "credit_links": args.credit_links_csv,
+            "bond_observations": args.bond_observations_csv,
+            "source_outcomes": args.source_outcomes_csv,
+            "survival_features": args.survival_features_csv,
+        },
+        config=_manifest_config(
+            args,
+            analysis_dates,
+            evaluation_cutoff,
+            feature_dimensions,
+            stability_dimensions,
+        ),
+        code_revision=args.code_revision,
+    )
 
     equity_provider = CsvMarketProvider(args.securities_csv, args.prices_csv)
     credit_provider = CsvBondMarketProvider(args.bond_observations_csv)
@@ -280,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
         bin_width=args.calibration_bin_width,
     )
     stability = evaluate_calibration_stability(report, dimensions=stability_dimensions)
+    manifest_payload = experiment_manifest_to_dict(manifest)
     payload = prior_calibration_to_dict(report)
     payload["analysis_dates"] = [item.isoformat() for item in analysis_dates]
     payload["walk_forward_prior_runs"] = [
@@ -293,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
         for run in prior_runs
     ]
     payload["stability"] = calibration_stability_to_dict(stability)
+    payload["experiment_manifest"] = manifest_payload
 
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
@@ -309,6 +372,7 @@ def main(argv: list[str] | None = None) -> int:
             _markdown(
                 report,
                 stability,
+                manifest_payload,
                 analysis_dates=analysis_dates,
                 prior_runs=tuple(prior_runs),
             ),
