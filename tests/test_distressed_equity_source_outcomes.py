@@ -16,7 +16,10 @@ from distressed_equity.source_outcomes import (
 
 FIELDS = [
     "security_id", "ticker", "analysis_date", "outcome_known_date",
-    "survived_12m", "existing_common_survived_12m", "normalized_within_3y", "equity_multiple_3y",
+    "survived_12m", "survived_12m_known_date", "survived_12m_evidence_refs",
+    "existing_common_survived_12m", "existing_common_survived_12m_known_date", "existing_common_survived_12m_evidence_refs",
+    "normalized_within_3y", "normalized_within_3y_known_date", "normalized_within_3y_evidence_refs",
+    "equity_multiple_3y", "equity_multiple_3y_known_date", "equity_multiple_3y_evidence_refs",
     "industry_group", "impairment_type", "leverage_bucket", "evidence_refs",
     "verification_status", "verifier", "verified_on", "evidence_reopened", "notes",
 ]
@@ -125,7 +128,7 @@ def test_verified_source_outcome_labels_require_reopened_evidence(tmp_path):
 def test_12m_and_3y_labels_cannot_be_known_before_their_horizons(tmp_path):
     path = tmp_path / "outcomes.csv"
     _write(path, [_row(outcome_known_date="2021-06-30", verified_on="2021-07-01", equity_multiple_3y="")])
-    with pytest.raises(ValueError, match="12m survival labels cannot be known"):
+    with pytest.raises(ValueError, match="survived_12m cannot be known"):
         CsvSourceBackedOutcomeIndex(path)
 
     _write(path, [_row(
@@ -133,9 +136,69 @@ def test_12m_and_3y_labels_cannot_be_known_before_their_horizons(tmp_path):
         verified_on="2023-01-01",
         survived_12m="",
         existing_common_survived_12m="",
+        normalized_within_3y="",
         equity_multiple_3y="4.0",
     )])
     with pytest.raises(ValueError, match="equity_multiple_3y cannot be known"):
+        CsvSourceBackedOutcomeIndex(path)
+
+
+def test_metric_specific_known_dates_expose_only_information_available_by_cutoff(tmp_path):
+    path = tmp_path / "outcomes.csv"
+    _write(path, [_row(
+        outcome_known_date="2024-01-31",
+        survived_12m="true",
+        survived_12m_known_date="2021-12-31",
+        survived_12m_evidence_refs="SEC:2021:SURVIVAL",
+        existing_common_survived_12m="true",
+        existing_common_survived_12m_known_date="2021-12-31",
+        existing_common_survived_12m_evidence_refs="SEC:2021:COMMON",
+        normalized_within_3y="",
+        equity_multiple_3y="4.0",
+        equity_multiple_3y_known_date="2023-12-31",
+        equity_multiple_3y_evidence_refs="SEC:2023:MULTIPLE",
+    )])
+    index = CsvSourceBackedOutcomeIndex(path)
+
+    early = index.known_labels(date(2022, 6, 30))
+    assert len(early) == 1
+    label = early[0]
+    assert label.survived_12m is True
+    assert label.existing_common_survived_12m is True
+    assert label.equity_multiple_3y is None
+    assert label.outcome_known_date == date(2021, 12, 31)
+    assert label.survived_12m_evidence_refs == ("SEC:2021:SURVIVAL",)
+    assert label.equity_multiple_3y_evidence_refs == ()
+
+    late = index.known_labels(date(2024, 12, 31))
+    assert late[0].equity_multiple_3y == 4.0
+    assert late[0].equity_multiple_3y_known_date == date(2023, 12, 31)
+    assert late[0].equity_multiple_3y_evidence_refs == ("SEC:2023:MULTIPLE",)
+
+
+def test_metric_specific_known_date_requires_metric_specific_evidence(tmp_path):
+    path = tmp_path / "outcomes.csv"
+    _write(path, [_row(
+        survived_12m_known_date="2021-12-31",
+        survived_12m_evidence_refs="",
+    )])
+    with pytest.raises(ValueError, match="survived_12m_evidence_refs is required"):
+        CsvSourceBackedOutcomeIndex(path)
+
+
+def test_row_outcome_known_date_must_cover_metric_specific_dates(tmp_path):
+    path = tmp_path / "outcomes.csv"
+    _write(path, [_row(
+        outcome_known_date="2021-12-31",
+        verified_on="2022-02-01",
+        survived_12m="true",
+        survived_12m_known_date="2022-01-31",
+        survived_12m_evidence_refs="SEC:2022:SURVIVAL",
+        existing_common_survived_12m="",
+        normalized_within_3y="",
+        equity_multiple_3y="",
+    )])
+    with pytest.raises(ValueError, match="outcome_known_date must be on or after"):
         CsvSourceBackedOutcomeIndex(path)
 
 
