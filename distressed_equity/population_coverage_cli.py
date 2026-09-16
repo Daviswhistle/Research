@@ -94,7 +94,7 @@ def _markdown(payload: dict[str, object]) -> str:
     for row in rows:
         assert isinstance(row, dict)
         reasons = row.get("skip_reason_counts")
-        assert isinstance(reasons, list)
+        assert isinstance(reasons, (list, tuple))
         if not reasons:
             lines.append(f"| {row['analysis_date']} | — | none | 0 |")
             continue
