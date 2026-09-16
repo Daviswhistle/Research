@@ -1,5 +1,6 @@
 import json
 
+from distressed_equity.instrument_verification import debt_snapshot_verification_template
 from distressed_equity.orchestration_cli import main
 
 
@@ -34,28 +35,29 @@ def workspace_packet():
     }
 
 
-def verification():
-    return {
-        "status": "verified",
-        "verifier": "workspace-snapshot-reviewer",
-        "verified_on": "2026-09-16",
-        "evidence_reopened": True,
-    }
-
-
-def instruments_payload():
-    return {"instruments": [
+def instruments_payload(source_packet=None):
+    source_packet = source_packet or workspace_packet()["debt_instrument_source_packet"]
+    raw = {"instruments": [
         {
             "as_of_date": "2023-01-01", "source_accession": "old", "name": "Old Notes",
             "principal": 1000.0, "maturity_year": 2025, "secured": False,
-            "cusip": "111111AA1", "source_refs": ["s-old"], "verification": verification(),
+            "cusip": "111111AA1", "source_refs": ["s-old"],
         },
         {
             "as_of_date": "2023-03-31", "source_accession": "new", "name": "New Secured Notes",
             "principal": 550.0, "maturity_year": 2028, "secured": True,
-            "cusip": "222222BB2", "source_refs": ["s-new"], "verification": verification(),
+            "cusip": "222222BB2", "source_refs": ["s-new"],
         },
     ]}
+    bound = debt_snapshot_verification_template(source_packet, raw)
+    for row in bound["instruments"]:
+        row["verification"].update({
+            "status": "verified",
+            "verifier": "workspace-snapshot-reviewer",
+            "verified_on": "2026-09-16",
+            "evidence_reopened": True,
+        })
+    return bound
 
 
 def events_payload():
@@ -78,8 +80,8 @@ def base_args(workspace, instruments_path):
 
 def test_research_workspace_requires_verification_before_confirming_lineage(tmp_path):
     workspace = tmp_path / "workspace"; workspace.mkdir()
-    write_json(workspace / "research_packet.json", workspace_packet())
-    instruments_path = tmp_path / "instruments.json"; write_json(instruments_path, instruments_payload())
+    frozen = workspace_packet(); write_json(workspace / "research_packet.json", frozen)
+    instruments_path = tmp_path / "instruments.json"; write_json(instruments_path, instruments_payload(frozen["debt_instrument_source_packet"]))
     events_path = tmp_path / "events.json"; write_json(events_path, events_payload())
 
     args = base_args(workspace, instruments_path) + ["--debt-lineage", str(events_path)]
@@ -108,8 +110,8 @@ def test_research_workspace_requires_verification_before_confirming_lineage(tmp_
 
 def test_in_place_approved_verification_survives_rebuild(tmp_path):
     workspace = tmp_path / "workspace"; workspace.mkdir()
-    write_json(workspace / "research_packet.json", workspace_packet())
-    instruments_path = tmp_path / "instruments.json"; write_json(instruments_path, instruments_payload())
+    frozen = workspace_packet(); write_json(workspace / "research_packet.json", frozen)
+    instruments_path = tmp_path / "instruments.json"; write_json(instruments_path, instruments_payload(frozen["debt_instrument_source_packet"]))
     events_path = tmp_path / "events.json"; write_json(events_path, events_payload())
     args = base_args(workspace, instruments_path) + ["--debt-lineage", str(events_path)]
 
@@ -134,8 +136,8 @@ def test_in_place_approved_verification_survives_rebuild(tmp_path):
 
 def test_rebuilding_ledger_without_lineage_removes_stale_lineage_artifacts(tmp_path):
     workspace = tmp_path / "workspace"; workspace.mkdir()
-    write_json(workspace / "research_packet.json", workspace_packet())
-    instruments_path = tmp_path / "instruments.json"; write_json(instruments_path, instruments_payload())
+    frozen = workspace_packet(); write_json(workspace / "research_packet.json", frozen)
+    instruments_path = tmp_path / "instruments.json"; write_json(instruments_path, instruments_payload(frozen["debt_instrument_source_packet"]))
     write_json(workspace / "debt_lineage.json", {"stale": True})
     write_json(workspace / "debt_lineage_verification_template.json", {"stale": True})
 
@@ -148,8 +150,8 @@ def test_rebuilding_ledger_without_lineage_removes_stale_lineage_artifacts(tmp_p
 
 def test_failed_replacement_lineage_does_not_leave_old_derived_artifacts(tmp_path):
     workspace = tmp_path / "workspace"; workspace.mkdir()
-    write_json(workspace / "research_packet.json", workspace_packet())
-    instruments_path = tmp_path / "instruments.json"; write_json(instruments_path, instruments_payload())
+    frozen = workspace_packet(); write_json(workspace / "research_packet.json", frozen)
+    instruments_path = tmp_path / "instruments.json"; write_json(instruments_path, instruments_payload(frozen["debt_instrument_source_packet"]))
     write_json(workspace / "debt_lineage.json", {"stale": True})
     write_json(workspace / "debt_lineage_verification_template.json", {"stale": True})
 
@@ -170,8 +172,8 @@ def test_failed_replacement_lineage_does_not_leave_old_derived_artifacts(tmp_pat
 
 def test_unverified_snapshot_candidate_is_rejected_by_workspace(tmp_path):
     workspace = tmp_path / "workspace"; workspace.mkdir()
-    write_json(workspace / "research_packet.json", workspace_packet())
-    raw = instruments_payload(); raw["instruments"][0].pop("verification")
+    frozen = workspace_packet(); write_json(workspace / "research_packet.json", frozen)
+    raw = instruments_payload(frozen["debt_instrument_source_packet"]); raw["instruments"][0].pop("verification")
     instruments_path = tmp_path / "instruments.json"; write_json(instruments_path, raw)
     try:
         main(base_args(workspace, instruments_path))
