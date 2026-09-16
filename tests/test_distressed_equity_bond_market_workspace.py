@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from distressed_equity.instrument_verification import debt_snapshot_verification_template
 from distressed_equity.orchestration_cli import main
 
 
@@ -43,8 +44,9 @@ def packet():
     }
 
 
-def debt_payload():
-    return {"instruments": [{
+def debt_payload(source_packet=None):
+    source_packet = source_packet or packet()["debt_instrument_source_packet"]
+    raw = {"instruments": [{
         "as_of_date": "2022-09-30",
         "source_accession": "acc1",
         "name": "5% Senior Notes",
@@ -57,13 +59,15 @@ def debt_payload():
         "cusip": "111111AA1",
         "source_refs": ["s1"],
         "notes": [],
-        "verification": {
-            "status": "verified",
-            "verifier": "bond-market-test",
-            "verified_on": "2026-09-16",
-            "evidence_reopened": True,
-        },
     }]}
+    bound = debt_snapshot_verification_template(source_packet, raw)
+    bound["instruments"][0]["verification"].update({
+        "status": "verified",
+        "verifier": "bond-market-test",
+        "verified_on": "2026-09-16",
+        "evidence_reopened": True,
+    })
+    return bound
 
 
 def base_args(workspace, debt_path):
@@ -77,8 +81,9 @@ def base_args(workspace, debt_path):
 
 def test_workspace_builds_bond_market_only_after_verified_debt_identity(tmp_path):
     workspace = tmp_path / "workspace"; workspace.mkdir()
-    write_json(workspace / "research_packet.json", packet())
-    debt_path = tmp_path / "debt.json"; write_json(debt_path, debt_payload())
+    frozen = packet()
+    write_json(workspace / "research_packet.json", frozen)
+    debt_path = tmp_path / "debt.json"; write_json(debt_path, debt_payload(frozen["debt_instrument_source_packet"]))
     bond_csv = tmp_path / "bond.csv"
     bond_csv.write_text(
         "date,cusip,price_pct_par,yield_pct,benchmark_yield_pct,volume,source\n"
@@ -129,9 +134,10 @@ def test_workspace_refuses_bond_market_without_verified_debt_input(tmp_path):
 def test_workspace_refuses_bond_market_without_frozen_debt_source_packet(tmp_path):
     workspace = tmp_path / "workspace"; workspace.mkdir()
     raw_packet = packet()
+    source = raw_packet["debt_instrument_source_packet"]
     raw_packet["debt_instrument_source_packet"] = None
     write_json(workspace / "research_packet.json", raw_packet)
-    debt_path = tmp_path / "debt.json"; write_json(debt_path, debt_payload())
+    debt_path = tmp_path / "debt.json"; write_json(debt_path, debt_payload(source))
     bond_csv = tmp_path / "bond.csv"
     bond_csv.write_text(
         "date,cusip,price_pct_par,yield_pct,benchmark_yield_pct\n"
@@ -151,12 +157,15 @@ def test_workspace_refuses_bond_market_without_frozen_debt_source_packet(tmp_pat
         raise AssertionError("expected workspace bond market without frozen debt evidence to fail")
 
 
-def test_rebuilding_debt_ledger_without_bond_provider_removes_stale_bond_market(tmp_path):
+def test_rebuilding_debt_ledger_without_bond_provider_removes_stale_bond_market_and_merged(tmp_path):
     workspace = tmp_path / "workspace"; workspace.mkdir()
-    write_json(workspace / "research_packet.json", packet())
+    frozen = packet()
+    write_json(workspace / "research_packet.json", frozen)
     write_json(workspace / "bond_market.json", {"stale": True})
-    debt_path = tmp_path / "debt.json"; write_json(debt_path, debt_payload())
+    write_json(workspace / "merged.json", {"stale": True})
+    debt_path = tmp_path / "debt.json"; write_json(debt_path, debt_payload(frozen["debt_instrument_source_packet"]))
 
     assert main(base_args(workspace, debt_path)) == 0
     assert not (workspace / "bond_market.json").exists()
+    assert not (workspace / "merged.json").exists()
     assert (workspace / "debt_instrument_ledger.json").exists()
