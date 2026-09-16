@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
+import hashlib
+import json
 from typing import Any, Iterable
 
 from .debt_instruments import DebtInstrumentLedger, DebtInstrumentSnapshot, DebtInstrumentVersion
@@ -21,6 +23,7 @@ LINEAGE_EVENT_TYPES = frozenset(
     }
 )
 LINEAGE_STATUSES = frozenset({"candidate", "verified"})
+VERIFICATION_STATUSES = frozenset({"unverified", "verified", "rejected"})
 ACCOUNTING_TREATMENTS = frozenset(
     {
         "undetermined",
@@ -66,6 +69,10 @@ class DebtLineageEvent:
     equity_issued_value: float | None = None
     accounting: DebtAccountingAssessment = DebtAccountingAssessment()
     notes: tuple[str, ...] = ()
+    verified_by: str | None = None
+    verified_on: date | None = None
+    verification_fingerprint: str | None = None
+    evidence_reopened: bool = False
 
 
 @dataclass(frozen=True)
@@ -215,6 +222,10 @@ def _event_from_dict(raw: dict[str, Any]) -> DebtLineageEvent:
     status = str(raw.get("status") or "candidate").strip().lower()
     if status not in LINEAGE_STATUSES:
         raise ValueError(f"{event_id}.status must be one of {sorted(LINEAGE_STATUSES)}")
+    if status != "candidate":
+        raise ValueError(
+            f"{event_id}.status must be candidate in input; verified status requires fingerprint-bound promotion"
+        )
 
     predecessors_raw = raw.get("predecessors", [])
     successors_raw = raw.get("successors", [])
@@ -238,7 +249,7 @@ def _event_from_dict(raw: dict[str, Any]) -> DebtLineageEvent:
         event_id=event_id,
         effective_date=_parse_date(raw.get("effective_date"), f"{event_id}.effective_date"),
         event_type=event_type,
-        status=status,
+        status="candidate",
         predecessors=predecessors,
         successors=successors,
         source_refs=_string_tuple(raw.get("source_refs", []), f"{event_id}.source_refs"),
@@ -258,6 +269,130 @@ def _event_from_dict(raw: dict[str, Any]) -> DebtLineageEvent:
     return event
 
 
+def _event_semantic_payload(event: DebtLineageEvent) -> dict[str, Any]:
+    def participant(item: DebtLineageParticipation) -> dict[str, Any]:
+        return {
+            "stable_id": item.stable_id,
+            "amount": item.amount,
+            "source_refs": list(item.source_refs),
+        }
+
+    return {
+        "event_id": event.event_id,
+        "effective_date": event.effective_date.isoformat(),
+        "event_type": event.event_type,
+        "predecessors": [participant(item) for item in event.predecessors],
+        "successors": [participant(item) for item in event.successors],
+        "source_refs": list(event.source_refs),
+        "source_accessions": list(event.source_accessions),
+        "cash_paid": event.cash_paid,
+        "fees_paid": event.fees_paid,
+        "equity_issued_shares": event.equity_issued_shares,
+        "equity_issued_value": event.equity_issued_value,
+        "accounting": {
+            "treatment": event.accounting.treatment,
+            "standard": event.accounting.standard,
+            "basis": event.accounting.basis,
+            "quantitative_test_pct": event.accounting.quantitative_test_pct,
+            "source_refs": list(event.accounting.source_refs),
+            "notes": list(event.accounting.notes),
+        },
+        "notes": list(event.notes),
+    }
+
+
+def debt_lineage_event_fingerprint(event: DebtLineageEvent) -> str:
+    canonical = json.dumps(
+        _event_semantic_payload(event),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def debt_lineage_verification_template(events: Iterable[DebtLineageEvent]) -> dict[str, Any]:
+    rows = tuple(events)
+    return {
+        "schema_version": "1",
+        "event_reviews": [
+            {
+                "event_id": event.event_id,
+                "event_fingerprint": debt_lineage_event_fingerprint(event),
+                "status": "unverified",
+                "verifier": None,
+                "verified_on": None,
+                "evidence_reopened": False,
+                "reviewer_note": "",
+            }
+            for event in rows
+        ],
+        "notes": [
+            "Mark an event verified only after re-opening every cited source span and confirming the predecessor/successor mapping and participating amounts.",
+            "Changing any event semantics invalidates the fingerprint and requires a new verification.",
+            "Accounting treatment needs its own cited evidence in addition to event-lineage verification.",
+        ],
+    }
+
+
+def promote_verified_debt_lineage_events(
+    events: Iterable[DebtLineageEvent],
+    verification: dict[str, Any],
+) -> tuple[DebtLineageEvent, ...]:
+    events_tuple = tuple(events)
+    by_id = {event.event_id: event for event in events_tuple}
+    if len(by_id) != len(events_tuple):
+        raise ValueError("duplicate lineage event_id values")
+    if verification.get("schema_version") != "1":
+        raise ValueError("lineage verification schema_version must be '1'")
+    raw_reviews = verification.get("event_reviews")
+    if not isinstance(raw_reviews, list):
+        raise ValueError("lineage verification event_reviews must be a list")
+
+    reviews: dict[str, dict[str, Any]] = {}
+    for idx, review in enumerate(raw_reviews):
+        if not isinstance(review, dict):
+            raise ValueError(f"lineage verification review {idx} must be an object")
+        event_id = str(review.get("event_id") or "").strip()
+        if not event_id or event_id in reviews:
+            raise ValueError(f"invalid or duplicate lineage verification event_id: {event_id!r}")
+        if event_id not in by_id:
+            raise ValueError(f"lineage verification references unknown event: {event_id}")
+        status = str(review.get("status") or "").strip().lower()
+        if status not in VERIFICATION_STATUSES:
+            raise ValueError(
+                f"lineage verification {event_id} status must be one of {sorted(VERIFICATION_STATUSES)}"
+            )
+        reviews[event_id] = review
+
+    promoted: list[DebtLineageEvent] = []
+    for event in events_tuple:
+        review = reviews.get(event.event_id)
+        if review is None or str(review.get("status") or "").strip().lower() != "verified":
+            promoted.append(event)
+            continue
+        expected_fingerprint = debt_lineage_event_fingerprint(event)
+        if review.get("event_fingerprint") != expected_fingerprint:
+            raise ValueError(f"lineage verification fingerprint mismatch: {event.event_id}")
+        verifier = str(review.get("verifier") or "").strip()
+        if not verifier:
+            raise ValueError(f"lineage verification verifier is required: {event.event_id}")
+        if review.get("evidence_reopened") is not True:
+            raise ValueError(f"lineage verification evidence was not re-opened: {event.event_id}")
+        verified_on = _parse_date(review.get("verified_on"), f"{event.event_id}.verified_on")
+        promoted.append(
+            replace(
+                event,
+                status="verified",
+                verified_by=verifier,
+                verified_on=verified_on,
+                verification_fingerprint=expected_fingerprint,
+                evidence_reopened=True,
+            )
+        )
+    return tuple(promoted)
+
+
 def _validate_event_shape(event: DebtLineageEvent) -> None:
     predecessor_ids = [item.stable_id for item in event.predecessors]
     successor_ids = [item.stable_id for item in event.successors]
@@ -269,6 +404,25 @@ def _validate_event_shape(event: DebtLineageEvent) -> None:
         raise ValueError(f"{event.event_id}: duplicate successor stable_id")
     if not event.source_refs:
         raise ValueError(f"{event.event_id}: source_refs are required")
+    if event.status not in LINEAGE_STATUSES:
+        raise ValueError(f"{event.event_id}: invalid lineage status {event.status!r}")
+    if event.status == "verified":
+        if not event.verified_by or event.verified_on is None or not event.evidence_reopened:
+            raise ValueError(
+                f"{event.event_id}: verified lineage requires verifier, verified_on, and evidence_reopened"
+            )
+        expected_fingerprint = debt_lineage_event_fingerprint(event)
+        if event.verification_fingerprint != expected_fingerprint:
+            raise ValueError(f"{event.event_id}: verified lineage fingerprint mismatch")
+    elif any(
+        (
+            event.verified_by,
+            event.verified_on,
+            event.verification_fingerprint,
+            event.evidence_reopened,
+        )
+    ):
+        raise ValueError(f"{event.event_id}: candidate lineage must not contain verification state")
 
     if event.event_type == "amendment":
         if len(event.predecessors) != 1 or len(event.successors) != 1:
@@ -779,6 +933,7 @@ def debt_lineage_graph_to_dict(graph: DebtLineageGraph) -> dict[str, Any]:
     payload["semantics"] = {
         "graph_model": "instrument -> event -> instrument hyperedge projection",
         "candidate_events_are_confirmed": False,
+        "verified_requires_fingerprint_bound_reopened_evidence": True,
         "accounting_treatment_is_auto_inferred": False,
         "participant_amount_meaning": "principal participating in the event, not necessarily full instrument outstanding",
         "snapshot_principal_is_event_ceiling_only_on_same_date": True,
@@ -815,10 +970,11 @@ def debt_lineage_event_template(ledger: DebtInstrumentLedger) -> dict[str, Any]:
             }
         ],
         "allowed_event_types": sorted(LINEAGE_EVENT_TYPES),
-        "allowed_statuses": sorted(LINEAGE_STATUSES),
+        "allowed_input_statuses": ["candidate"],
         "allowed_accounting_treatments": sorted(ACCOUNTING_TREATMENTS),
         "available_stable_ids": stable_ids,
         "guardrails": [
+            "Do not mark status=verified in the event file; verification is a separate fingerprint-bound artifact.",
             "Do not merge old and new CUSIPs merely to force continuity; represent an exchange as an explicit event between distinct stable IDs.",
             "Use participant amount for the principal actually tendered/exchanged/redeemed when an event is partial.",
             "For exchange/refinancing/conversion, leave unchanged residual debt outside the event instead of repeating the same stable ID on both sides.",
