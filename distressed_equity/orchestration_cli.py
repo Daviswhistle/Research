@@ -148,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.debt_lineage_verification and not args.debt_lineage:
         raise ValueError("--debt-lineage-verification requires --debt-lineage")
+    # Load an in-place approval before any stale derived artifacts are invalidated.
     lineage_verification_input = _load_json(args.debt_lineage_verification) if args.debt_lineage_verification else None
 
     if packet_path.exists() and not args.refresh:
@@ -201,8 +202,9 @@ def main(argv: list[str] | None = None) -> int:
         debt_ledger_payload = debt_instrument_ledger_to_dict(debt_ledger)
         _write_json(workspace / "debt_instrument_ledger.json", debt_ledger_payload)
         _write_json(workspace / "debt_lineage_template.json", debt_lineage_event_template(debt_ledger))
-        if not args.debt_lineage:
-            _clear_stale_lineage_artifacts(workspace)
+        # The ledger is the identity basis for every derived lineage artifact. Once
+        # it changes, old lineage must disappear even if the replacement later fails.
+        _clear_stale_lineage_artifacts(workspace)
 
     if args.debt_lineage:
         if debt_ledger is None:
@@ -222,7 +224,12 @@ def main(argv: list[str] | None = None) -> int:
             source_packet_fingerprint=source_fingerprint,
         )
         verification_path = workspace / "debt_lineage_verification_template.json"
-        if lineage_verification_input is None or not _same_path(verification_path, args.debt_lineage_verification):
+        verification_is_in_place = bool(
+            lineage_verification_input is not None
+            and args.debt_lineage_verification
+            and _same_path(verification_path, args.debt_lineage_verification)
+        )
+        if lineage_verification_input is None or not verification_is_in_place:
             _write_json(verification_path, verification_template)
         if lineage_verification_input is not None:
             events = promote_verified_debt_lineage_events(
@@ -233,6 +240,10 @@ def main(argv: list[str] | None = None) -> int:
         lineage = build_debt_lineage_graph(debt_ledger, events)
         debt_lineage_payload = debt_lineage_graph_to_dict(lineage)
         _write_json(workspace / "debt_lineage.json", debt_lineage_payload)
+        if verification_is_in_place:
+            # Restore the already-loaded approved artifact only after successful
+            # validation/promotion so a failed rebuild cannot leave stale approval.
+            _write_json(verification_path, lineage_verification_input)
 
     merged = None
     if args.result:
