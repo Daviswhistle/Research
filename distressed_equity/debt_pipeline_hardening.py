@@ -7,21 +7,11 @@ from typing import Any
 
 
 def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_module: Any) -> None:
-    """Install conservative boundaries shared by extraction, ledger and lineage.
-
-    The structured extractors intentionally produce research candidates. This layer
-    makes the transition from candidate -> verified debt snapshot -> confirmed
-    lineage explicit and prevents precision/identity shortcuts from leaking into
-    investment-facing topology.
-    """
+    """Install conservative boundaries shared by extraction, ledger and lineage."""
 
     if getattr(sec_module, "_debt_pipeline_hardening_installed", False):
         return
 
-    # ------------------------------------------------------------------
-    # 1. Generated snapshot templates: effective date remains unresolved
-    #    and the reviewer attestation is explicit in the generated workflow.
-    # ------------------------------------------------------------------
     original_template_for_cluster = sec_module._template_for_cluster
 
     def hardened_template_for_cluster(document: Any, proposals: tuple[Any, ...], source_span_ids: tuple[str, ...]):
@@ -84,10 +74,6 @@ def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_m
 
     sec_module.instrument_verification_template = hardened_verification_template
 
-    # ------------------------------------------------------------------
-    # 2. Ledger JSON cannot carry NaN/Infinity or silently truncate fractional
-    #    maturity years into matching or lineage.
-    # ------------------------------------------------------------------
     original_snapshot_from_dict = debt_module._snapshot_from_dict
     finite_keys = (
         "principal", "commitment", "drawn", "available", "coupon_pct", "spread_bps",
@@ -100,7 +86,7 @@ def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_m
             if value is None:
                 continue
             if isinstance(value, bool) or not isinstance(value, (int, float)):
-                continue  # original parser emits the canonical numeric type error
+                continue
             if not math.isfinite(float(value)):
                 raise ValueError(f"{name}: {key} must be finite")
         maturity_year = raw.get("maturity_year")
@@ -112,12 +98,6 @@ def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_m
 
     debt_module._snapshot_from_dict = hardened_snapshot_from_dict
 
-    # ------------------------------------------------------------------
-    # 3. Boundary snapshot ties must be source-disambiguated at ANY selected
-    #    boundary date, not only on the event date itself. If no observation
-    #    exists on the correct side of the event, preserve contextual terms but
-    #    blank principal so it cannot become an implicit participating amount.
-    # ------------------------------------------------------------------
     def hardened_boundary_snapshot(
         versions: tuple[Any, ...],
         event_date: date,
@@ -187,10 +167,6 @@ def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_m
 
     lineage_module._boundary_snapshot = hardened_boundary_snapshot
 
-    # ------------------------------------------------------------------
-    # 4. Maturity comparisons use shared precision. A year-only maturity does
-    #    not invent January 1 against an exact date in the same year.
-    # ------------------------------------------------------------------
     original_impact_for_event = lineage_module._impact_for_event
 
     def _maturity_effect(before: str | None, after: str | None) -> str:
@@ -229,10 +205,6 @@ def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_m
 
     lineage_module._impact_for_event = hardened_impact_for_event
 
-    # ------------------------------------------------------------------
-    # 5. Public graph construction re-validates numeric event semantics even
-    #    when callers bypass JSON parsers and construct dataclasses directly.
-    # ------------------------------------------------------------------
     def _validate_programmatic_event_numbers(event: Any) -> None:
         def check(value: Any, field: str) -> None:
             if value is None:
@@ -255,11 +227,9 @@ def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_m
         check(event.equity_issued_value, "equity_issued_value")
         check(event.accounting.quantitative_test_pct, "accounting.quantitative_test_pct")
 
-    # ------------------------------------------------------------------
-    # 6. Terminal topology uses aggregate consumption against one complete
-    #    observed predecessor state. Distinct as-of dates within one accession
-    #    remain distinct observations.
-    # ------------------------------------------------------------------
+    # Terminal topology can only prove full extinguishment against a principal
+    # balance measured on the event date itself. Off-date balances remain useful
+    # context for impacts but are not an event-date cap.
     original_build_graph = lineage_module.build_debt_lineage_graph
 
     def hardened_build_graph(ledger: Any, events: Any):
@@ -297,13 +267,15 @@ def install_debt_pipeline_hardening(sec_module: Any, debt_module: Any, lineage_m
                     event.event_type in lineage_module._CONSUMING_EVENT_TYPES
                     and amount is not None
                     and snapshot.principal is not None
+                    and snapshot.as_of_date == event.effective_date
                 ):
                     key = (participant.stable_id, snapshot.as_of_date, snapshot.source_accession)
                     consumption[key] = consumption.get(key, 0.0) + amount
                     caps[key] = snapshot.principal
                     continue
-                # Unknown consumption cannot prove extinguishment. Preserve the
-                # instrument as a possible terminal rather than inventing zero residual.
+                # Unknown or off-date consumption cannot prove extinguishment.
+                # Preserve the instrument as a possible terminal rather than
+                # turning a historical balance into an event-date ceiling.
 
         for key, total in consumption.items():
             cap = caps[key]
