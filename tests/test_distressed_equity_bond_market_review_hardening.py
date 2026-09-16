@@ -83,6 +83,26 @@ def test_eodhd_rejects_partially_incompatible_bond_history():
     assert "close" in message
 
 
+def test_eodhd_rejects_unknown_top_level_bond_envelope():
+    class UnknownEnvelopeSession:
+        def get(self, url, params=None, timeout=None):
+            if "/eod/" in url:
+                return FakeResponse({"data": {"unexpected": "object"}})
+            return FakeResponse({"data": []})
+
+    provider = EodhdBondProvider(api_key="test", session=UnknownEnvelopeSession())
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.observations(
+            cusip="111111AA1",
+            isin=None,
+            start=date(2022, 12, 1),
+            end=date(2022, 12, 31),
+        )
+    message = str(excinfo.value)
+    assert "response envelope is incompatible" in message
+    assert "data[] list" in message
+
+
 def test_eodhd_does_not_hide_incompatible_identifier_behind_empty_fallback():
     isin = "US111111AA11"
 
