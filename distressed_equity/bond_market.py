@@ -185,23 +185,73 @@ def _daily_observations(rows: Iterable[BondMarketObservation]) -> tuple[BondMark
     return tuple(by_date[dt][0] for dt in sorted(by_date))
 
 
-def _snapshot_by_stable_id(
+def _versions_before_cutoff(
     ledger: DebtInstrumentLedger,
     analysis_date: date,
-) -> dict[str, DebtInstrumentSnapshot]:
+) -> dict[str, list[DebtInstrumentVersion]]:
     grouped: dict[str, list[DebtInstrumentVersion]] = {}
     for version in ledger.versions:
         if version.snapshot.as_of_date <= analysis_date:
             grouped.setdefault(version.stable_id, []).append(version)
+    for versions in grouped.values():
+        versions.sort(key=lambda item: (item.snapshot.as_of_date, item.snapshot.source_accession))
+    return grouped
+
+
+def _snapshot_by_stable_id(
+    ledger: DebtInstrumentLedger,
+    analysis_date: date,
+) -> dict[str, DebtInstrumentSnapshot]:
+    grouped = _versions_before_cutoff(ledger, analysis_date)
     output: dict[str, DebtInstrumentSnapshot] = {}
     for stable_id, versions in grouped.items():
-        versions.sort(key=lambda item: (item.snapshot.as_of_date, item.snapshot.source_accession))
         latest_date = versions[-1].snapshot.as_of_date
         latest = [item.snapshot for item in versions if item.snapshot.as_of_date == latest_date]
         if len(latest) != 1:
             continue
         output[stable_id] = latest[0]
     return output
+
+
+def _market_identifiers_for_stable_id(
+    ledger: DebtInstrumentLedger,
+    *,
+    stable_id: str,
+    analysis_date: date,
+) -> tuple[str | None, str | None]:
+    """Carry verified identifiers forward only from versions known by the cutoff.
+
+    A later filing may omit the CUSIP/ISIN while the stable legal instrument is
+    unchanged. Market linkage should retain the established identity, but it must
+    never use an identifier first observed after the research cutoff.
+    """
+
+    versions = [
+        item for item in ledger.versions
+        if item.stable_id == stable_id and item.snapshot.as_of_date <= analysis_date
+    ]
+    cusips = {
+        cleaned for item in versions
+        if (cleaned := _clean_identifier(item.snapshot.cusip)) is not None
+    }
+    isins = {
+        cleaned for item in versions
+        if (cleaned := _clean_identifier(item.snapshot.isin)) is not None
+    }
+
+    prefix, separator, raw_identifier = stable_id.partition(":")
+    if separator and raw_identifier:
+        cleaned_stable = _clean_identifier(raw_identifier)
+        if prefix.upper() == "CUSIP" and cleaned_stable:
+            cusips.add(cleaned_stable)
+        elif prefix.upper() == "ISIN" and cleaned_stable:
+            isins.add(cleaned_stable)
+
+    if len(cusips) > 1:
+        raise ValueError(f"stable debt ID {stable_id} has conflicting historical CUSIPs before cutoff: {sorted(cusips)}")
+    if len(isins) > 1:
+        raise ValueError(f"stable debt ID {stable_id} has conflicting historical ISINs before cutoff: {sorted(isins)}")
+    return next(iter(cusips), None), next(iter(isins), None)
 
 
 def _remaining_years(snapshot: DebtInstrumentSnapshot, as_of: date) -> tuple[float | None, str | None]:
@@ -316,6 +366,8 @@ def _assessment(
     *,
     stable_id: str,
     snapshot: DebtInstrumentSnapshot,
+    cusip: str | None,
+    isin: str | None,
     analysis_date: date,
     lookback_days: int,
     max_staleness_days: int,
@@ -324,8 +376,10 @@ def _assessment(
     probability_horizon_years: float,
 ) -> BondInstrumentMarketAssessment:
     warnings: list[str] = []
-    cusip = _clean_identifier(snapshot.cusip)
-    isin = _clean_identifier(snapshot.isin)
+    latest_cusip = _clean_identifier(snapshot.cusip)
+    latest_isin = _clean_identifier(snapshot.isin)
+    cusip = _clean_identifier(cusip)
+    isin = _clean_identifier(isin)
     if not cusip and not isin:
         return _empty_assessment(
             stable_id=stable_id,
@@ -333,7 +387,11 @@ def _assessment(
             analysis_date=analysis_date,
             cusip=None,
             isin=None,
-            warning="no explicit CUSIP/ISIN; bond market data was not fuzzy-matched by name",
+            warning="no explicit CUSIP/ISIN was verified by the cutoff; bond market data was not fuzzy-matched by name",
+        )
+    if (cusip and not latest_cusip) or (isin and not latest_isin):
+        warnings.append(
+            "bond market identifier was carried forward from the verified stable debt identity/history because the latest snapshot omitted it"
         )
 
     start = analysis_date - timedelta(days=lookback_days)
@@ -348,13 +406,18 @@ def _assessment(
             filtered.append(row)
     rows = _daily_observations(filtered)
     if not rows:
-        return _empty_assessment(
+        empty = _empty_assessment(
             stable_id=stable_id,
             snapshot=snapshot,
             analysis_date=analysis_date,
             cusip=cusip,
             isin=isin,
             warning="no bond market observation was available in the configured lookback window",
+        )
+        if not warnings:
+            return empty
+        return BondInstrumentMarketAssessment(
+            **{**asdict(empty), "warnings": tuple(dict.fromkeys((*warnings, *empty.warnings)))}
         )
 
     current = rows[-1]
@@ -485,6 +548,12 @@ def build_bond_market_packet(
             provider,
             stable_id=stable_id,
             snapshot=snapshot,
+            cusip=_market_identifiers_for_stable_id(
+                ledger, stable_id=stable_id, analysis_date=analysis_date
+            )[0],
+            isin=_market_identifiers_for_stable_id(
+                ledger, stable_id=stable_id, analysis_date=analysis_date
+            )[1],
             analysis_date=analysis_date,
             lookback_days=lookback_days,
             max_staleness_days=max_staleness_days,
