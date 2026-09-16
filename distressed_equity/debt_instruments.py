@@ -208,6 +208,10 @@ def _snapshot_from_dict(raw: dict[str, Any]) -> DebtInstrumentSnapshot:
     if any(value is not None and value < 0 for value in values.values()):
         raise ValueError(f"{name}: principal/commitment/drawn/available cannot be negative")
 
+    secured = raw.get("secured")
+    if secured is not None and not isinstance(secured, bool):
+        raise ValueError(f"{name}: secured must be boolean or null")
+
     return DebtInstrumentSnapshot(
         as_of_date=date.fromisoformat(as_of_raw[:10]),
         source_accession=accession,
@@ -220,7 +224,7 @@ def _snapshot_from_dict(raw: dict[str, Any]) -> DebtInstrumentSnapshot:
         benchmark=(str(raw["benchmark"]).strip() if raw.get("benchmark") else None),
         spread_bps=optional_float("spread_bps"),
         seniority=(str(raw["seniority"]).strip() if raw.get("seniority") else None),
-        secured=raw.get("secured"),
+        secured=secured,
         currency=str(raw.get("currency") or "USD").upper(),
         cusip=(str(raw["cusip"]) if raw.get("cusip") else None),
         isin=(str(raw["isin"]) if raw.get("isin") else None),
@@ -247,15 +251,31 @@ def _change_fields(previous: DebtInstrumentSnapshot, current: DebtInstrumentSnap
     return tuple(field for field in fields if getattr(previous, field) != getattr(current, field))
 
 
+def _classify_maturity_change(previous: DebtInstrumentSnapshot, current: DebtInstrumentSnapshot) -> str:
+    if previous.maturity_date is not None and current.maturity_date is not None:
+        if current.maturity_date > previous.maturity_date:
+            return "maturity_extended"
+        if current.maturity_date < previous.maturity_date:
+            return "maturity_accelerated"
+        return "maturity_changed"
+
+    old_year = previous.maturity_year or (previous.maturity_date.year if previous.maturity_date else None)
+    new_year = current.maturity_year or (current.maturity_date.year if current.maturity_date else None)
+    if old_year is None or new_year is None:
+        return "maturity_changed"
+    if new_year > old_year:
+        return "maturity_extended"
+    if new_year < old_year:
+        return "maturity_accelerated"
+    if (previous.maturity_date is None) != (current.maturity_date is None):
+        return "maturity_precision_changed"
+    return "maturity_changed"
+
+
 def _classify_changes(fields: tuple[str, ...], previous: DebtInstrumentSnapshot, current: DebtInstrumentSnapshot) -> tuple[str, ...]:
     classes: list[str] = []
     if any(field in fields for field in ("maturity_date", "maturity_year")):
-        old_year = _effective_maturity(previous)[0]
-        new_year = _effective_maturity(current)[0]
-        if old_year is not None and new_year is not None:
-            classes.append("maturity_extended" if new_year > old_year else "maturity_accelerated")
-        else:
-            classes.append("maturity_changed")
+        classes.append(_classify_maturity_change(previous, current))
     if "principal" in fields:
         classes.append("principal_changed")
     if any(field in fields for field in ("coupon_pct", "benchmark", "spread_bps")):
