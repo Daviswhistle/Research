@@ -24,6 +24,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eodhd-key", help="Defaults to EODHD_API_KEY")
     parser.add_argument("--lookback-days", type=int, default=365)
     parser.add_argument("--max-staleness-days", type=int, default=30)
+    parser.add_argument(
+        "--max-benchmark-staleness-days",
+        type=int,
+        default=7,
+        help="Maximum age of an external Treasury benchmark versus the bond observation before spread/PD are left unresolved",
+    )
     parser.add_argument("--probability-horizon-years", type=float, default=1.0)
     parser.add_argument(
         "--recovery-rates",
@@ -103,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         cutoff,
         lookback_days=args.lookback_days,
         max_staleness_days=args.max_staleness_days,
+        max_benchmark_staleness_days=args.max_benchmark_staleness_days,
         recovery_rates=_recoveries(args.recovery_rates),
         probability_horizon_years=args.probability_horizon_years,
     )
