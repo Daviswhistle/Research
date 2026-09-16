@@ -61,6 +61,17 @@ def _value(raw: dict[str, str | None], field: str | None) -> str:
     return str(raw.get(field) or "").strip()
 
 
+def _first_nonempty(
+    raw: dict[str, str | None],
+    choices: Iterable[tuple[str | None, str]],
+) -> tuple[str, str] | None:
+    for field, basis in choices:
+        value = _value(raw, field)
+        if value:
+            return value, basis
+    return None
+
+
 def _dict_reader(path: Path) -> csv.DictReader:
     handle = path.open("r", encoding="utf-8-sig", newline="")
     sample = handle.read(4096)
@@ -83,6 +94,7 @@ class TraceSecurityEvent:
     new_symbol: str | None
     new_cusip: str | None
     source_ref: str
+    date_basis: str = "source_effective_date"
 
 
 @dataclass(frozen=True)
@@ -153,9 +165,15 @@ def _event_kind(value: str) -> EventKind:
 def read_trace_daily_list_events(paths: Iterable[str | Path]) -> tuple[TraceSecurityEvent, ...]:
     """Read FINRA TRACE Corporate/Agency Daily List security exports.
 
-    Supported layouts include user-guide/UI-style column names and compact API
-    aliases. Effective dates are mandatory; Daily List publication date is never
-    substituted for identity effectiveness.
+    Date semantics deliberately follow the FINRA field definitions:
+    - additions use Trade Report Effective Date;
+    - deletions use Effective Date;
+    - changes use Update Date, falling back to DL Date, because Old/New Trade
+      Report Effective Date describe trade-report eligibility rather than the
+      date the Symbol/CUSIP change became observable in the Data Master.
+
+    The change boundary is therefore an availability boundary, not a claim that
+    the legal/security-reference change necessarily became effective earlier.
     """
 
     events: list[TraceSecurityEvent] = []
@@ -170,9 +188,16 @@ def read_trace_daily_list_events(paths: Iterable[str | Path]) -> tuple[TraceSecu
             ))
             if event_field is None:
                 raise ValueError(f"TRACE Daily List {path.name}: event/category column is required")
-            effective_field = _lookup(fields, (
-                "Effective Date", "EFCTV_DT", "Trade Report Effective Date", "New Trade Report Effective Date"
+
+            add_effective_field = _lookup(fields, (
+                "Trade Report Effective Date", "TRD_RPT_EFCTV_DT"
             ))
+            delete_effective_field = _lookup(fields, (
+                "Effective Date", "Deletion Effective Date", "Effective Date of Deletion", "EFCTV_DT"
+            ))
+            update_date_field = _lookup(fields, ("Update Date", "UPDATE_DT"))
+            dl_date_field = _lookup(fields, ("DL Date", "Daily List Date", "DAILY_LIST_DT"))
+
             old_symbol_field = _lookup(fields, ("Old Symbol", "OLD_SYM_CD", "Old TRACE Symbol"))
             new_symbol_field = _lookup(fields, ("New Symbol", "NEW_SYM_CD", "New TRACE Symbol"))
             symbol_field = _lookup(fields, ("Symbol", "SYM_CD", "TRACE Symbol"))
@@ -184,13 +209,38 @@ def read_trace_daily_list_events(paths: Iterable[str | Path]) -> tuple[TraceSecu
                 if not any(str(value or "").strip() for value in raw.values()):
                     continue
                 kind = _event_kind(_value(raw, event_field))
+
+                if kind == "add":
+                    chosen_date = _first_nonempty(raw, (
+                        (add_effective_field, "trade_report_effective_date"),
+                    ))
+                elif kind == "delete":
+                    chosen_date = _first_nonempty(raw, (
+                        (delete_effective_field, "deletion_effective_date"),
+                    ))
+                else:
+                    chosen_date = _first_nonempty(raw, (
+                        (update_date_field, "update_date"),
+                        (dl_date_field, "daily_list_date_availability_fallback"),
+                    ))
+                if chosen_date is None:
+                    expected = {
+                        "add": "Trade Report Effective Date",
+                        "delete": "Effective Date",
+                        "change": "Update Date or DL Date",
+                    }[kind]
+                    raise ValueError(
+                        f"TRACE Daily List {path.name} row {row_number}: {expected} is required for {kind} identity timing"
+                    )
+                raw_date, date_basis = chosen_date
                 effective = _parse_date(
-                    _value(raw, effective_field),
-                    field="Effective Date",
+                    raw_date,
+                    field=date_basis,
                     source=path.name,
                     row=row_number,
                 )
-                source_ref = f"{path.name}:row{row_number}"
+                source_ref = f"{path.name}:row{row_number}:{date_basis}"
+
                 if kind == "change":
                     old_symbol = _symbol(_value(raw, old_symbol_field) or _value(raw, symbol_field))
                     new_symbol = _symbol(_value(raw, new_symbol_field) or _value(raw, symbol_field))
@@ -199,7 +249,9 @@ def read_trace_daily_list_events(paths: Iterable[str | Path]) -> tuple[TraceSecu
                     if not old_symbol and not new_symbol:
                         continue
                     events.append(
-                        TraceSecurityEvent(kind, effective, old_symbol, old_cusip, new_symbol, new_cusip, source_ref)
+                        TraceSecurityEvent(
+                            kind, effective, old_symbol, old_cusip, new_symbol, new_cusip, source_ref, date_basis
+                        )
                     )
                     continue
 
@@ -211,9 +263,13 @@ def read_trace_daily_list_events(paths: Iterable[str | Path]) -> tuple[TraceSecu
                     # A CUSIP-unlicensed Daily List cannot establish identity.
                     continue
                 if kind == "add":
-                    events.append(TraceSecurityEvent(kind, effective, None, None, symbol, cusip, source_ref))
+                    events.append(
+                        TraceSecurityEvent(kind, effective, None, None, symbol, cusip, source_ref, date_basis)
+                    )
                 else:
-                    events.append(TraceSecurityEvent(kind, effective, symbol, cusip, None, None, source_ref))
+                    events.append(
+                        TraceSecurityEvent(kind, effective, symbol, cusip, None, None, source_ref, date_basis)
+                    )
         finally:
             handle.close()
     return tuple(events)
@@ -251,7 +307,16 @@ def read_trace_security_master_snapshot(
                         f"TRACE Security Master {path.name} row {row_number}: CUSIP is blank; use a CUSIP-licensed export"
                     )
                 events.append(
-                    TraceSecurityEvent("snapshot", as_of, None, None, symbol, cusip, f"{path.name}:row{row_number}")
+                    TraceSecurityEvent(
+                        "snapshot",
+                        as_of,
+                        None,
+                        None,
+                        symbol,
+                        cusip,
+                        f"{path.name}:row{row_number}:security_master_as_of",
+                        "security_master_as_of",
+                    )
                 )
         finally:
             handle.close()
