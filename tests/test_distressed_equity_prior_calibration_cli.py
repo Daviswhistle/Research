@@ -81,11 +81,27 @@ def test_prior_calibration_cli_replays_grid_and_scores_ex_ante_priors(tmp_path: 
         "--survival-features-csv", str(features),
         "--feature-dimensions", "liquidity_runway",
         "--calibration-bin-width", "0.5",
+        "--code-revision", "test-rev",
         "--output", str(output),
         "--markdown-output", str(markdown),
     ]) == 0
 
     payload = json.loads(output.read_text(encoding="utf-8"))
+    manifest = payload["experiment_manifest"]
+    assert manifest["pipeline"] == "prior_calibration"
+    assert manifest["code_revision"] == "test-rev"
+    assert manifest["code_revision_source"] == "explicit"
+    assert manifest["reproducibility_complete"] is True
+    assert len(manifest["data_config_fingerprint"]) == 64
+    assert len(manifest["experiment_fingerprint"]) == 64
+    assert manifest["config"]["analysis_dates"] == ["2018-12-31", "2020-12-31", "2022-12-31"]
+    assert manifest["config"]["evaluation_cutoff"] == "2024-12-31"
+    assert manifest["config"]["feature_dimensions"] == ["liquidity_runway"]
+    assert manifest["config"]["stability_dimensions"] == [
+        "target_date", "target_year", "credit_group", "calibration_n_band", "basis_bucket"
+    ]
+    assert manifest["config"]["calibration_bin_width"] == 0.5
+
     assert payload["analysis_dates"] == ["2018-12-31", "2020-12-31", "2022-12-31"]
     assert payload["prior_run_count"] == 2
     assert payload["target_case_count"] == 2
@@ -96,7 +112,6 @@ def test_prior_calibration_cli_replays_grid_and_scores_ex_ante_priors(tmp_path: 
     assert survival["forecast_count"] == 2
     assert survival["mean_predicted_probability"] == pytest.approx(0.75)
     assert survival["observed_rate"] == 0.5
-    # 2020 B: p=1.0, actual=0 => 1.0; 2022 C: p=0.5, actual=1 => 0.25.
     assert survival["brier_score"] == pytest.approx(0.625)
     assert survival["small_sample_forecast_count"] == 2
 
@@ -128,6 +143,8 @@ def test_prior_calibration_cli_replays_grid_and_scores_ex_ante_priors(tmp_path: 
 
     summary = markdown.read_text(encoding="utf-8")
     assert "Walk-forward prior calibration" in summary
+    assert "experiment fingerprint" in summary
+    assert manifest["experiment_fingerprint"] in summary
     assert "Brier score" in summary
     assert "0.6250" in summary
     assert "credit_group" in summary
