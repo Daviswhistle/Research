@@ -11,7 +11,6 @@ from .complex_table_debt_extraction import install_complex_table_extraction
 from .native_pdf_complex_hardening import install_complex_native_pdf_hardening
 from .native_pdf_debt_extraction import (
     _MIN_NATIVE_FRAGMENTS,
-    _MIN_NATIVE_TEXT_CHARS,
     _pdf_bytes,
     _pdf_status_warning,
     extract_pdf_text_fragments,
@@ -30,7 +29,14 @@ class VisualExtractionRequiredError(RuntimeError):
 
 
 class NativePdfTextPayload(str):
-    """String-compatible native PDF text carrying the original PDF bytes."""
+    """String-compatible native PDF text carrying the original PDF bytes.
+
+    This payload is a transport for reference discovery and for handing the exact
+    bytes back to the deterministic PDF extractor. It is intentionally less
+    opinionated than the debt-candidate gate: sparse text can travel through the
+    graph, while the downstream extractor still refuses sparse prose unless a
+    concrete coordinate-table candidate is proven.
+    """
 
     pdf_bytes: bytes
     source_url: str
@@ -46,11 +52,11 @@ def _native_payload(client: Any, url: str) -> NativePdfTextPayload:
     content = _pdf_bytes(client, url)
     fragments = extract_pdf_text_fragments(content)
     character_count = sum(len(re.sub(r"\s+", "", item.text)) for item in fragments)
-    if len(fragments) < _MIN_NATIVE_FRAGMENTS or character_count < _MIN_NATIVE_TEXT_CHARS:
+    if len(fragments) < _MIN_NATIVE_FRAGMENTS:
         raise VisualExtractionRequiredError(
             "VISUAL_EXTRACTION_REQUIRED"
             f"|media_type=pdf|url={url}"
-            f"|reason=native_text_layer_unavailable_or_too_sparse"
+            f"|reason=native_text_layer_unavailable"
             f"|fragment_count={len(fragments)}|character_count={character_count}"
         )
     rows = layout_rows(fragments)
