@@ -52,21 +52,16 @@ def _tenor_years(tenor: str) -> float | None:
 class EodhdBondProvider:
     """Targeted US corporate-bond history using EODHD APIs.
 
-    EODHD documents historical US corporate-bond data by CUSIP/ISIN with daily
-    price, yield and volume. Existing EODHD wrappers route those identifiers
-    through the generic EOD endpoint using the `.BOND` suffix. Because the older
-    dedicated bond documentation URL is no longer published, this adapter treats
-    that route as a compatibility surface and validates the response shape
-    strictly: rows must expose bond-specific `price` and `yield` fields. A normal
-    OHLC `close` response is never silently accepted as a bond price.
+    Existing EODHD wrappers route CUSIP/ISIN identifiers through the generic EOD
+    endpoint using the `.BOND` suffix. Because the older dedicated bond docs are
+    no longer published, this adapter treats that route as a compatibility
+    surface and validates every in-range row strictly. A partially incompatible
+    response is rejected rather than silently retaining only rows that happen to
+    look bond-like.
 
-    Treasury benchmark yields use EODHD's currently documented
-    `/ust/yield-rates` endpoint and are selected without looking past the bond
-    observation date.
-
-    This provider is intentionally `bulk_safe=False`: it performs per-bond API
-    requests and is intended for the verified debt ledger of one issuer, not a
-    whole-market bond replay.
+    Treasury benchmark yields use `/ust/yield-rates` and are selected without
+    looking past the bond observation date. Benchmark freshness is enforced by
+    the common bond-market analytics layer.
     """
 
     name = "eodhd_bonds"
@@ -148,19 +143,25 @@ class EodhdBondProvider:
         )
         raw_rows = self._rows(payload)
         output: list[BondMarketObservation] = []
+        malformed: list[tuple[str, tuple[str, ...]]] = []
         is_isin = len(identifier) == 12 and identifier[:2].isalpha()
         for raw in raw_rows:
             dt = _date(raw.get("date"))
-            if dt is None or not start <= dt <= end:
+            if dt is None:
+                malformed.append(("invalid_or_missing_date", tuple(sorted(str(key) for key in raw))))
                 continue
-            # The historical corporate-bond feed is documented as price/yield/volume.
-            # Do not fall back to stock-like OHLC fields such as `close`: if the
-            # compatibility route changes shape we want a loud failure, not a false
-            # bond observation.
+            if not start <= dt <= end:
+                continue
+            # Compatibility route must expose bond-specific price/yield fields.
+            # Never reinterpret stock-like OHLC `close` as a bond price.
             price = _float(raw.get("price"))
             yield_pct = _float(raw.get("yield"))
             volume = _float(raw.get("volume"))
             if price is None or yield_pct is None:
+                malformed.append((dt.isoformat(), tuple(sorted(str(key) for key in raw))))
+                continue
+            if price < 0 or (volume is not None and volume < 0):
+                malformed.append((dt.isoformat(), tuple(sorted(str(key) for key in raw))))
                 continue
             output.append(
                 BondMarketObservation(
@@ -173,11 +174,11 @@ class EodhdBondProvider:
                     source=f"EODHD eod/{identifier}.BOND",
                 )
             )
-        if raw_rows and not output:
-            field_sample = sorted({str(key) for row in raw_rows[:3] for key in row})
+        if malformed:
+            sample = malformed[:3]
             raise RuntimeError(
-                "EODHD .BOND response did not expose the documented bond price/yield shape; "
-                f"refusing to reinterpret generic EOD fields as bond data (fields={field_sample})"
+                "EODHD .BOND response contained incompatible rows; refusing partial acceptance "
+                f"or reinterpretation as bond data (sample={sample})"
             )
         result = tuple(sorted(output, key=lambda item: item.date))
         self._bond_cache[cache_key] = result
@@ -196,20 +197,22 @@ class EodhdBondProvider:
         identifiers = [item for item in (_identifier(isin), _identifier(cusip)) if item]
         if not identifiers:
             return ()
-        errors: list[Exception] = []
+        errors: list[tuple[str, Exception]] = []
         unique_identifiers = tuple(dict.fromkeys(identifiers))
         for identifier in unique_identifiers:
             try:
                 rows = self._bond_history(identifier, start, end)
             except (requests.RequestException, RuntimeError, ValueError) as exc:
-                errors.append(exc)
+                errors.append((identifier, exc))
                 continue
             if rows:
                 return rows
-        if errors and len(errors) == len(unique_identifiers):
+        if errors:
+            # If one explicit identifier exposed an API/compatibility failure, do
+            # not hide it merely because another identifier returned an empty set.
             raise RuntimeError(
-                "EODHD bond history failed for all explicit identifiers: "
-                + "; ".join(str(exc) for exc in errors)
+                "EODHD bond history failed for explicit identifier(s): "
+                + "; ".join(f"{identifier}: {exc}" for identifier, exc in errors)
             )
         return ()
 
