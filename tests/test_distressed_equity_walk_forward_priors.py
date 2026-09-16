@@ -111,7 +111,7 @@ def _outcome(
     *,
     survived: bool,
     common: bool,
-    normalized: bool,
+    normalized: bool | None,
     multiple: str = "",
 ):
     return {
@@ -121,7 +121,7 @@ def _outcome(
         "outcome_known_date": known.isoformat(),
         "survived_12m": str(survived).lower(),
         "existing_common_survived_12m": str(common).lower(),
-        "normalized_within_3y": str(normalized).lower(),
+        "normalized_within_3y": "" if normalized is None else str(normalized).lower(),
         "equity_multiple_3y": multiple,
         "industry_group": "x",
         "impairment_type": "temporary",
@@ -164,9 +164,9 @@ def test_walk_forward_prior_uses_only_historical_known_outcomes_and_deduped_epis
     _write(outcome_path, OUTCOME_FIELDS, [
         _outcome("A", "A", date(2018, 12, 31), date(2021, 12, 31), survived=True, common=True, normalized=True, multiple="4"),
         # Duplicate A-2019 exists in raw historical runs but its entire episode is collapsed before calibration.
-        _outcome("A", "A", date(2019, 12, 31), date(2022, 1, 31), survived=False, common=False, normalized=False, multiple=""),
-        _outcome("B", "B", date(2019, 12, 31), date(2021, 12, 31), survived=False, common=False, normalized=False, multiple=""),
-        _outcome("X", "X", date(2021, 12, 31), date(2022, 12, 31), survived=False, common=False, normalized=False, multiple=""),
+        _outcome("A", "A", date(2019, 12, 31), date(2022, 1, 31), survived=False, common=False, normalized=None, multiple=""),
+        _outcome("B", "B", date(2019, 12, 31), date(2021, 12, 31), survived=False, common=False, normalized=None, multiple=""),
+        _outcome("X", "X", date(2021, 12, 31), date(2022, 12, 31), survived=False, common=False, normalized=None, multiple=""),
     ])
 
     priors = build_walk_forward_priors(
