@@ -129,6 +129,30 @@ def _validate_observation(observation: BondMarketObservation) -> None:
         raise ValueError("bond market volume cannot be negative")
 
 
+def _daily_observations(rows: Iterable[BondMarketObservation]) -> tuple[BondMarketObservation, ...]:
+    """Require a single semantic daily observation.
+
+    Raw TRACE contains multiple executions per bond/day. This research layer does
+    not choose a hidden aggregation rule. Exact duplicate rows may be collapsed,
+    but distinct same-day observations must be aggregated upstream with an
+    explicit policy such as last disseminated trade or VWAP.
+    """
+
+    by_date: dict[date, list[BondMarketObservation]] = {}
+    for row in rows:
+        candidates = by_date.setdefault(row.date, [])
+        if row not in candidates:
+            candidates.append(row)
+    ambiguous = {dt: items for dt, items in by_date.items() if len(items) > 1}
+    if ambiguous:
+        dates = ", ".join(sorted(dt.isoformat() for dt in ambiguous))
+        raise ValueError(
+            "multiple distinct bond observations exist on the same date "
+            f"({dates}); aggregate transaction-level data upstream with an explicit daily policy"
+        )
+    return tuple(by_date[dt][0] for dt in sorted(by_date))
+
+
 def _snapshot_by_stable_id(
     ledger: DebtInstrumentLedger,
     analysis_date: date,
@@ -269,12 +293,15 @@ def _assessment(
         )
 
     start = analysis_date - timedelta(days=lookback_days)
-    rows = provider.observations(cusip=cusip, isin=isin, start=start, end=analysis_date)
-    for row in rows:
+    raw_rows = provider.observations(cusip=cusip, isin=isin, start=start, end=analysis_date)
+    filtered: list[BondMarketObservation] = []
+    for row in raw_rows:
         _validate_observation(row)
         if row.date > analysis_date:
             raise ValueError("bond market provider returned a future observation")
-    rows = tuple(sorted((row for row in rows if start <= row.date <= analysis_date), key=lambda row: row.date))
+        if start <= row.date <= analysis_date:
+            filtered.append(row)
+    rows = _daily_observations(filtered)
     if not rows:
         return BondInstrumentMarketAssessment(
             stable_id=stable_id,
