@@ -23,11 +23,40 @@ def _parse_date(value: Any, field: str) -> date:
     return date.fromisoformat(value[:10])
 
 
+def _validate_snapshot_verification(raw: dict[str, Any], name: str) -> tuple[str, ...]:
+    errors: list[str] = []
+    verification = raw.get("verification")
+    if not isinstance(verification, dict):
+        return (
+            f"{name}: explicit verification is required before a debt snapshot can enter the stable ledger",
+        )
+    status = str(verification.get("status") or "").strip().lower()
+    if status != "verified":
+        errors.append(f"{name}: verification.status must be 'verified'")
+    verifier = str(verification.get("verifier") or "").strip()
+    if not verifier:
+        errors.append(f"{name}: verification.verifier is required")
+    if verification.get("evidence_reopened") is not True:
+        errors.append(f"{name}: verification.evidence_reopened must be true")
+    try:
+        _parse_date(verification.get("verified_on"), f"{name}.verification.verified_on")
+    except ValueError as exc:
+        errors.append(str(exc))
+    return tuple(errors)
+
+
 def validate_debt_snapshots_against_source_packet(
     source_packet: dict[str, Any],
     raw_instruments: dict[str, Any] | list[dict[str, Any]],
 ) -> DebtSnapshotSourceValidation:
-    """Require every ledger snapshot to trace back to frozen SEC exhibit spans."""
+    """Require verified ledger snapshots to trace back to frozen SEC exhibit spans.
+
+    `as_of_date` is the economic/effective measurement date of the debt balance or
+    terms. SEC `published_on` is when that evidence became public. A quarter-end
+    snapshot may therefore legitimately predate the filing that reports it. Only
+    the research cutoff constrains publication; source provenance and an explicit
+    evidence-reopen verification gate control ledger promotion.
+    """
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -58,6 +87,8 @@ def validate_debt_snapshots_against_source_packet(
             errors.append(f"instrument {idx}: row must be an object")
             continue
         name = str(raw.get("name") or f"instrument {idx}")
+        errors.extend(_validate_snapshot_verification(raw, name))
+
         refs = [str(item).strip() for item in raw.get("source_refs", []) if str(item).strip()]
         if not refs:
             errors.append(f"{name}: source_refs are required for source-backed ledger ingestion")
@@ -87,16 +118,16 @@ def validate_debt_snapshots_against_source_packet(
             errors.append(
                 f"{name}: as_of_date {as_of.isoformat()} is after workspace cutoff {analysis_date.isoformat()}"
             )
-        published_dates: list[date] = []
         for ref in refs:
             try:
-                published_dates.append(_parse_date(span_map[ref].get("published_on"), f"span {ref}.published_on"))
+                published_on = _parse_date(span_map[ref].get("published_on"), f"span {ref}.published_on")
             except ValueError as exc:
                 errors.append(str(exc))
-        if published_dates and max(published_dates) > as_of:
-            errors.append(
-                f"{name}: snapshot as_of_date predates one or more cited SEC exhibit spans"
-            )
+                continue
+            if published_on > analysis_date:
+                errors.append(
+                    f"{name}: cited source {ref} was published after workspace cutoff {analysis_date.isoformat()}"
+                )
 
     try:
         snapshots = debt_snapshots_from_dict(raw_instruments)
