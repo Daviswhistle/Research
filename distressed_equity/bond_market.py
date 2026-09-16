@@ -59,6 +59,7 @@ class BondInstrumentMarketAssessment:
     price_drawdown_from_peak: float | None
     yield_change_from_lookback_low_bps: float | None
     benchmark: BondBenchmarkObservation | None
+    benchmark_days_stale: int | None
     spread_bps: float | None
     implied_credit_risk: tuple[ImpliedCreditRisk, ...]
     signals: tuple[str, ...]
@@ -70,6 +71,8 @@ class BondMarketPacket:
     provider: str
     analysis_date: date
     lookback_days: int
+    max_staleness_days: int
+    max_benchmark_staleness_days: int
     probability_horizon_years: float
     recovery_rates: tuple[float, ...]
     assessments: tuple[BondInstrumentMarketAssessment, ...]
@@ -196,8 +199,6 @@ def _snapshot_by_stable_id(
         latest_date = versions[-1].snapshot.as_of_date
         latest = [item.snapshot for item in versions if item.snapshot.as_of_date == latest_date]
         if len(latest) != 1:
-            # A stable ID with two competing observations at the latest date is
-            # not safe to use for market linkage without explicit version state.
             continue
         output[stable_id] = latest[0]
     return output
@@ -237,13 +238,6 @@ def spread_implied_credit_risk(
     recovery_rate: float,
     horizon_years: float,
 ) -> ImpliedCreditRisk:
-    """Constant-hazard spread proxy, explicitly not a physical default forecast.
-
-    Uses the reduced-form approximation spread ≈ hazard * (1 - recovery).
-    Credit/liquidity/risk premia are not separated, so the result is best treated
-    as a market-implied stress equivalent and compared across dates/scenarios.
-    """
-
     if not math.isfinite(spread_bps):
         raise ValueError("spread_bps must be finite")
     if not 0 <= recovery_rate < 1:
@@ -287,6 +281,36 @@ def _signals(
     return tuple(signals)
 
 
+def _empty_assessment(
+    *,
+    stable_id: str,
+    snapshot: DebtInstrumentSnapshot,
+    analysis_date: date,
+    cusip: str | None,
+    isin: str | None,
+    warning: str,
+) -> BondInstrumentMarketAssessment:
+    return BondInstrumentMarketAssessment(
+        stable_id=stable_id,
+        instrument_name=snapshot.name,
+        cusip=cusip,
+        isin=isin,
+        analysis_date=analysis_date,
+        observation=None,
+        days_stale=None,
+        lookback_observation_count=0,
+        price_peak_pct_par=None,
+        price_drawdown_from_peak=None,
+        yield_change_from_lookback_low_bps=None,
+        benchmark=None,
+        benchmark_days_stale=None,
+        spread_bps=None,
+        implied_credit_risk=(),
+        signals=(),
+        warnings=(warning,),
+    )
+
+
 def _assessment(
     provider: HistoricalBondMarketProvider,
     *,
@@ -295,6 +319,7 @@ def _assessment(
     analysis_date: date,
     lookback_days: int,
     max_staleness_days: int,
+    max_benchmark_staleness_days: int,
     recovery_rates: tuple[float, ...],
     probability_horizon_years: float,
 ) -> BondInstrumentMarketAssessment:
@@ -302,23 +327,13 @@ def _assessment(
     cusip = _clean_identifier(snapshot.cusip)
     isin = _clean_identifier(snapshot.isin)
     if not cusip and not isin:
-        return BondInstrumentMarketAssessment(
+        return _empty_assessment(
             stable_id=stable_id,
-            instrument_name=snapshot.name,
+            snapshot=snapshot,
+            analysis_date=analysis_date,
             cusip=None,
             isin=None,
-            analysis_date=analysis_date,
-            observation=None,
-            days_stale=None,
-            lookback_observation_count=0,
-            price_peak_pct_par=None,
-            price_drawdown_from_peak=None,
-            yield_change_from_lookback_low_bps=None,
-            benchmark=None,
-            spread_bps=None,
-            implied_credit_risk=(),
-            signals=(),
-            warnings=("no explicit CUSIP/ISIN; bond market data was not fuzzy-matched by name",),
+            warning="no explicit CUSIP/ISIN; bond market data was not fuzzy-matched by name",
         )
 
     start = analysis_date - timedelta(days=lookback_days)
@@ -333,23 +348,13 @@ def _assessment(
             filtered.append(row)
     rows = _daily_observations(filtered)
     if not rows:
-        return BondInstrumentMarketAssessment(
+        return _empty_assessment(
             stable_id=stable_id,
-            instrument_name=snapshot.name,
+            snapshot=snapshot,
+            analysis_date=analysis_date,
             cusip=cusip,
             isin=isin,
-            analysis_date=analysis_date,
-            observation=None,
-            days_stale=None,
-            lookback_observation_count=0,
-            price_peak_pct_par=None,
-            price_drawdown_from_peak=None,
-            yield_change_from_lookback_low_bps=None,
-            benchmark=None,
-            spread_bps=None,
-            implied_credit_risk=(),
-            signals=(),
-            warnings=("no bond market observation was available in the configured lookback window",),
+            warning="no bond market observation was available in the configured lookback window",
         )
 
     current = rows[-1]
@@ -367,10 +372,17 @@ def _assessment(
 
     remaining, maturity_warning = _remaining_years(snapshot, current.date)
     benchmark = None
-    if current.benchmark_yield_pct is None and remaining is not None:
+    benchmark_days_stale = None
+    if (
+        current.spread_bps is None
+        and current.benchmark_yield_pct is None
+        and remaining is not None
+    ):
         benchmark = provider.benchmark_on_or_before(as_of=current.date, remaining_years=remaining)
-        if benchmark is not None and benchmark.date > current.date:
-            raise ValueError("bond benchmark provider returned a future observation")
+        if benchmark is not None:
+            if benchmark.date > current.date:
+                raise ValueError("bond benchmark provider returned a future observation")
+            benchmark_days_stale = (current.date - benchmark.date).days
     if maturity_warning:
         warnings.append(maturity_warning)
     if days_stale > max_staleness_days:
@@ -378,7 +390,19 @@ def _assessment(
             f"latest bond observation is {days_stale} days before cutoff; treat price/yield as stale"
         )
 
-    spread = _spread_bps(current, benchmark)
+    benchmark_for_spread = benchmark
+    if (
+        benchmark is not None
+        and benchmark_days_stale is not None
+        and benchmark_days_stale > max_benchmark_staleness_days
+    ):
+        warnings.append(
+            f"Treasury benchmark is {benchmark_days_stale} days older than the bond observation; "
+            "credit spread and spread-implied probability were left unresolved"
+        )
+        benchmark_for_spread = None
+
+    spread = _spread_bps(current, benchmark_for_spread)
     risk: tuple[ImpliedCreditRisk, ...] = ()
     if spread is not None:
         risk = tuple(
@@ -408,6 +432,7 @@ def _assessment(
         price_drawdown_from_peak=drawdown,
         yield_change_from_lookback_low_bps=yield_change,
         benchmark=benchmark,
+        benchmark_days_stale=benchmark_days_stale,
         spread_bps=spread,
         implied_credit_risk=risk,
         signals=_signals(
@@ -427,6 +452,7 @@ def build_bond_market_packet(
     *,
     lookback_days: int = 365,
     max_staleness_days: int = 30,
+    max_benchmark_staleness_days: int = 7,
     recovery_rates: Iterable[float] = (0.20, 0.40, 0.60),
     probability_horizon_years: float = 1.0,
 ) -> BondMarketPacket:
@@ -434,6 +460,8 @@ def build_bond_market_packet(
         raise ValueError("lookback_days must be positive")
     if max_staleness_days < 0:
         raise ValueError("max_staleness_days cannot be negative")
+    if max_benchmark_staleness_days < 0:
+        raise ValueError("max_benchmark_staleness_days cannot be negative")
     if not math.isfinite(probability_horizon_years) or probability_horizon_years <= 0:
         raise ValueError("probability_horizon_years must be positive and finite")
     recoveries = tuple(float(item) for item in recovery_rates)
@@ -460,6 +488,7 @@ def build_bond_market_packet(
             analysis_date=analysis_date,
             lookback_days=lookback_days,
             max_staleness_days=max_staleness_days,
+            max_benchmark_staleness_days=max_benchmark_staleness_days,
             recovery_rates=recoveries,
             probability_horizon_years=probability_horizon_years,
         )
@@ -471,6 +500,8 @@ def build_bond_market_packet(
         provider=provider.name,
         analysis_date=analysis_date,
         lookback_days=lookback_days,
+        max_staleness_days=max_staleness_days,
+        max_benchmark_staleness_days=max_benchmark_staleness_days,
         probability_horizon_years=float(probability_horizon_years),
         recovery_rates=recoveries,
         assessments=assessments,
