@@ -53,8 +53,14 @@ class EodhdBondProvider:
     """Targeted US corporate-bond history using EODHD APIs.
 
     EODHD documents historical US corporate-bond data by CUSIP/ISIN with daily
-    price, yield and volume. The historical identifier is routed through the EOD
-    endpoint using the `.BOND` suffix. Treasury benchmark yields use EODHD's
+    price, yield and volume. Existing EODHD wrappers route those identifiers
+    through the generic EOD endpoint using the `.BOND` suffix. Because the older
+    dedicated bond documentation URL is no longer published, this adapter treats
+    that route as a compatibility surface and validates the response shape
+    strictly: rows must expose bond-specific `price` and `yield` fields. A normal
+    OHLC `close` response is never silently accepted as a bond price.
+
+    Treasury benchmark yields use EODHD's currently documented
     `/ust/yield-rates` endpoint and are selected without looking past the bond
     observation date.
 
@@ -110,9 +116,15 @@ class EodhdBondProvider:
         )
         response.raise_for_status()
         payload = response.json()
-        if isinstance(payload, dict) and any(key in payload for key in ("error", "message")):
+        if isinstance(payload, dict):
+            if payload.get("error"):
+                raise RuntimeError(f"EODHD API error: {payload}")
             status = payload.get("status")
-            if status and int(status) >= 400:
+            try:
+                status_code = int(status) if status is not None else None
+            except (TypeError, ValueError):
+                status_code = None
+            if status_code is not None and status_code >= 400:
                 raise RuntimeError(f"EODHD API error: {payload}")
         return payload
 
@@ -134,20 +146,21 @@ class EodhdBondProvider:
             f"eod/{identifier}.BOND",
             **{"from": start.isoformat(), "to": end.isoformat(), "period": "d", "order": "a"},
         )
+        raw_rows = self._rows(payload)
         output: list[BondMarketObservation] = []
         is_isin = len(identifier) == 12 and identifier[:2].isalpha()
-        for raw in self._rows(payload):
-            dt = _date(raw.get("date") or raw.get("timestamp"))
+        for raw in raw_rows:
+            dt = _date(raw.get("date"))
             if dt is None or not start <= dt <= end:
                 continue
+            # The historical corporate-bond feed is documented as price/yield/volume.
+            # Do not fall back to stock-like OHLC fields such as `close`: if the
+            # compatibility route changes shape we want a loud failure, not a false
+            # bond observation.
             price = _float(raw.get("price"))
-            if price is None:
-                price = _float(raw.get("close"))
             yield_pct = _float(raw.get("yield"))
-            if yield_pct is None:
-                yield_pct = _float(raw.get("yield_pct") or raw.get("yieldPercent"))
             volume = _float(raw.get("volume"))
-            if price is None and yield_pct is None:
+            if price is None or yield_pct is None:
                 continue
             output.append(
                 BondMarketObservation(
@@ -159,6 +172,12 @@ class EodhdBondProvider:
                     volume=volume,
                     source=f"EODHD eod/{identifier}.BOND",
                 )
+            )
+        if raw_rows and not output:
+            field_sample = sorted({str(key) for row in raw_rows[:3] for key in row})
+            raise RuntimeError(
+                "EODHD .BOND response did not expose the documented bond price/yield shape; "
+                f"refusing to reinterpret generic EOD fields as bond data (fields={field_sample})"
             )
         result = tuple(sorted(output, key=lambda item: item.date))
         self._bond_cache[cache_key] = result
@@ -178,7 +197,8 @@ class EodhdBondProvider:
         if not identifiers:
             return ()
         errors: list[Exception] = []
-        for identifier in dict.fromkeys(identifiers):
+        unique_identifiers = tuple(dict.fromkeys(identifiers))
+        for identifier in unique_identifiers:
             try:
                 rows = self._bond_history(identifier, start, end)
             except (requests.RequestException, RuntimeError, ValueError) as exc:
@@ -186,7 +206,7 @@ class EodhdBondProvider:
                 continue
             if rows:
                 return rows
-        if errors and len(errors) == len(set(identifiers)):
+        if errors and len(errors) == len(unique_identifiers):
             raise RuntimeError(
                 "EODHD bond history failed for all explicit identifiers: "
                 + "; ".join(str(exc) for exc in errors)
@@ -237,5 +257,8 @@ class EodhdBondProvider:
             return None
         return min(
             curve,
-            key=lambda row: (abs((_tenor_years(row.tenor) or 0.0) - remaining_years), _tenor_years(row.tenor) or 0.0),
+            key=lambda row: (
+                abs((_tenor_years(row.tenor) or 0.0) - remaining_years),
+                _tenor_years(row.tenor) or 0.0,
+            ),
         )
