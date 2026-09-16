@@ -190,6 +190,55 @@ def test_security_master_snapshot_is_never_backfilled_before_as_of_date(tmp_path
     assert resolver.resolve("TEST1", date(2023, 3, 1)).cusip == "111111AA1"
 
 
+def test_same_day_change_chain_does_not_leave_intermediate_symbol_active(tmp_path):
+    daily = tmp_path / "daily.csv"
+    _write_daily_list(daily, [
+        _addition("2023-01-01", symbol="A", cusip="111111AA1"),
+        {
+            "Category": "SC-Security Change",
+            "DL Date": "2023-02-01",
+            "Update Date": "2023-02-01",
+            "Old Symbol": "A",
+            "New Symbol": "B",
+            "Old CUSIP": "111111AA1",
+            "New CUSIP": "222222BB2",
+        },
+        {
+            "Category": "SC-Security Change",
+            "DL Date": "2023-02-01",
+            "Update Date": "2023-02-01",
+            "Old Symbol": "B",
+            "New Symbol": "C",
+            "Old CUSIP": "222222BB2",
+            "New CUSIP": "333333CC3",
+        },
+    ])
+    resolver = build_trace_security_master_resolver(read_trace_daily_list_events([daily]))
+    assert resolver.resolve("A", date(2023, 1, 31)).cusip == "111111AA1"
+    assert resolver.resolve("A", date(2023, 2, 1)) is None
+    assert resolver.resolve("B", date(2023, 2, 1)) is None
+    assert resolver.resolve("B", date(2023, 2, 2)) is None
+    assert resolver.resolve("C", date(2023, 2, 1)).cusip == "333333CC3"
+
+
+def test_later_snapshot_provenance_is_not_attached_to_earlier_identity_interval(tmp_path):
+    daily = tmp_path / "daily.csv"
+    master = tmp_path / "master.csv"
+    _write_daily_list(daily, [_addition("2023-01-01")])
+    master.write_text("Symbol,CUSIP\nTEST1,111111AA1\n", encoding="utf-8")
+    daily_events = read_trace_daily_list_events([daily])
+    snapshot_events = read_trace_security_master_snapshot([master], as_of=date(2023, 3, 1))
+    resolver = build_trace_security_master_resolver((*daily_events, *snapshot_events))
+
+    february = resolver.resolve("TEST1", date(2023, 2, 15))
+    march = resolver.resolve("TEST1", date(2023, 3, 1))
+    assert february is not None and march is not None
+    assert all("security_master_as_of" not in ref for ref in february.source_refs)
+    assert any("security_master_as_of" in ref for ref in march.source_refs)
+    assert set(february.source_refs).issubset(set(march.source_refs))
+    assert resolver.interval_count == 2
+
+
 def test_symbol_only_trace_row_resolves_from_execution_date_mapping(tmp_path):
     daily = tmp_path / "daily.csv"
     raw = tmp_path / "trace.txt"
