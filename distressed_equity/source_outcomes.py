@@ -22,6 +22,11 @@ _COMMON_TERMINAL_EVENT_TYPES = frozenset({
     "cash_acquisition_closed",
     "final_liquidation_distribution",
 })
+_FINAL_SHAREHOLDER_PAYOFF_EVENT_TYPES = frozenset({
+    "fixed_cash_acquisition_closed",
+    "final_liquidation_distribution",
+    "common_extinguished_no_distribution",
+})
 
 
 @dataclass(frozen=True)
@@ -29,6 +34,15 @@ class TerminalOutcomeFact:
     event_type: str
     event_date: date
     known_date: date
+    evidence_refs: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class FinalShareholderPayoffFact:
+    event_type: str
+    event_date: date
+    known_date: date
+    payoff_multiple: float
     evidence_refs: tuple[str, ...]
 
 
@@ -52,6 +66,7 @@ class SourceBackedOutcomeLabel:
     equity_multiple_3y_evidence_refs: tuple[str, ...]
     company_terminal_fact: TerminalOutcomeFact | None
     common_terminal_fact: TerminalOutcomeFact | None
+    final_shareholder_payoff_fact: FinalShareholderPayoffFact | None
     industry_group: str | None
     impairment_type: str | None
     leverage_bucket: str | None
@@ -71,8 +86,8 @@ class SourceBackedOutcomeLabel:
         Row-level evidence can include later documents supporting later metrics.
         The cutoff-safe view therefore rebuilds `evidence_refs` exclusively from
         the metric-specific refs admitted by the cutoff instead of retaining the
-        original row-wide evidence set. Terminal facts are retained only when
-        they were known by the cutoff and support an admitted outcome metric.
+        original row-wide evidence set. Terminal/payoff facts are retained only
+        when they were known by the cutoff and support an admitted outcome metric.
         """
 
         updates: dict[str, object] = {}
@@ -125,8 +140,16 @@ class SourceBackedOutcomeLabel:
             and self.common_terminal_fact.known_date <= cutoff
             and admitted_values["existing_common_survived_12m"] is False
         )
+        final_payoff_admitted = (
+            self.final_shareholder_payoff_fact is not None
+            and self.final_shareholder_payoff_fact.known_date <= cutoff
+            and admitted_values["equity_multiple_3y"] is not None
+        )
         updates["company_terminal_fact"] = self.company_terminal_fact if company_terminal_admitted else None
         updates["common_terminal_fact"] = self.common_terminal_fact if common_terminal_admitted else None
+        updates["final_shareholder_payoff_fact"] = (
+            self.final_shareholder_payoff_fact if final_payoff_admitted else None
+        )
         updates["outcome_known_date"] = max(known_dates)
         updates["evidence_refs"] = tuple(dict.fromkeys(admitted_refs))
         # Free-form row notes may summarize later evidence/outcomes and therefore
@@ -293,6 +316,57 @@ def _terminal_fact(
     )
 
 
+def _final_shareholder_payoff_fact(
+    raw: dict[str, str | None],
+    *,
+    analysis_date: date,
+    row: int,
+) -> FinalShareholderPayoffFact | None:
+    type_field = "final_shareholder_payoff_event_type"
+    date_field = "final_shareholder_payoff_event_date"
+    known_field = "final_shareholder_payoff_known_date"
+    multiple_field = "final_shareholder_payoff_multiple"
+    refs_field = "final_shareholder_payoff_evidence_refs"
+    event_type = str(raw.get(type_field) or "").strip().lower()
+    raw_date = str(raw.get(date_field) or "").strip()
+    raw_known = str(raw.get(known_field) or "").strip()
+    raw_multiple = str(raw.get(multiple_field) or "").strip()
+    refs = _refs(raw.get(refs_field))
+    if not any((event_type, raw_date, raw_known, raw_multiple, refs)):
+        return None
+    if not event_type or not raw_date or not raw_known or not raw_multiple or not refs:
+        raise ValueError(
+            f"source outcomes CSV row {row}: final shareholder payoff fact requires event_type, event_date, known_date, payoff_multiple, and evidence_refs"
+        )
+    if event_type not in _FINAL_SHAREHOLDER_PAYOFF_EVENT_TYPES:
+        raise ValueError(
+            f"source outcomes CSV row {row}: {type_field} must be one of {sorted(_FINAL_SHAREHOLDER_PAYOFF_EVENT_TYPES)}"
+        )
+    event_date = _parse_date(raw_date, field=date_field, row=row)
+    known_date = _parse_date(raw_known, field=known_field, row=row)
+    payoff_multiple = _float(raw_multiple, field=multiple_field, row=row)
+    assert payoff_multiple is not None
+    if event_date < analysis_date:
+        raise ValueError(
+            f"source outcomes CSV row {row}: {date_field} cannot precede analysis_date"
+        )
+    if known_date < event_date:
+        raise ValueError(
+            f"source outcomes CSV row {row}: {known_field} cannot precede final payoff event date"
+        )
+    if event_type == "common_extinguished_no_distribution" and payoff_multiple != 0:
+        raise ValueError(
+            f"source outcomes CSV row {row}: common_extinguished_no_distribution requires payoff_multiple=0"
+        )
+    return FinalShareholderPayoffFact(
+        event_type=event_type,
+        event_date=event_date,
+        known_date=known_date,
+        payoff_multiple=payoff_multiple,
+        evidence_refs=refs,
+    )
+
+
 def _validate_early_false(
     *,
     metric: str,
@@ -325,6 +399,46 @@ def _validate_early_false(
     if missing_refs:
         raise ValueError(
             f"source outcomes CSV row {row}: {metric} evidence_refs must include terminal-event evidence refs: {', '.join(missing_refs)}"
+        )
+
+
+def _validate_final_payoff(
+    *,
+    multiple: float | None,
+    known_date: date | None,
+    metric_refs: tuple[str, ...],
+    horizon: date,
+    payoff_fact: FinalShareholderPayoffFact | None,
+    row: int,
+) -> None:
+    if payoff_fact is not None and multiple is None:
+        raise ValueError(
+            f"source outcomes CSV row {row}: final shareholder payoff fact requires equity_multiple_3y"
+        )
+    if multiple is None or known_date is None:
+        return
+    if payoff_fact is None:
+        if known_date < horizon:
+            raise ValueError(
+                f"source outcomes CSV row {row}: equity_multiple_3y cannot be known before the +3y horizon without an explicit final shareholder-payoff model"
+            )
+        return
+    if not math.isclose(payoff_fact.payoff_multiple, multiple, rel_tol=1e-12, abs_tol=1e-12):
+        raise ValueError(
+            f"source outcomes CSV row {row}: final shareholder payoff multiple does not match equity_multiple_3y"
+        )
+    if payoff_fact.known_date > known_date:
+        raise ValueError(
+            f"source outcomes CSV row {row}: equity_multiple_3y known date precedes final-payoff knowledge"
+        )
+    if payoff_fact.event_date > horizon:
+        raise ValueError(
+            f"source outcomes CSV row {row}: final shareholder payoff event occurs after the +3y horizon"
+        )
+    missing_refs = sorted(set(payoff_fact.evidence_refs) - set(metric_refs))
+    if missing_refs:
+        raise ValueError(
+            f"source outcomes CSV row {row}: equity_multiple_3y evidence_refs must include final-payoff evidence refs: {', '.join(missing_refs)}"
         )
 
 
@@ -400,6 +514,15 @@ class CsvSourceBackedOutcomeIndex:
                     raw.get("normalized_within_3y"), field="normalized_within_3y", row=row_number
                 )
                 multiple = _float(raw.get("equity_multiple_3y"), field="equity_multiple_3y", row=row_number)
+                final_payoff = _final_shareholder_payoff_fact(
+                    raw,
+                    analysis_date=analysis_date,
+                    row=row_number,
+                )
+                if final_payoff is not None and multiple is None:
+                    raise ValueError(
+                        f"source outcomes CSV row {row_number}: final shareholder payoff fact requires equity_multiple_3y"
+                    )
                 if all(value is None for value in (survived, common_survived, normalized, multiple)):
                     raise ValueError(
                         f"source outcomes CSV row {row_number}: at least one outcome field must be resolved"
@@ -503,10 +626,14 @@ class CsvSourceBackedOutcomeIndex:
                         terminal_fact=company_terminal,
                         row=row_number,
                     )
-                if multiple_known is not None and multiple_known < _add_years(analysis_date, 3):
-                    raise ValueError(
-                        f"source outcomes CSV row {row_number}: equity_multiple_3y cannot be known before the +3y horizon without an explicit final shareholder-payoff model"
-                    )
+                _validate_final_payoff(
+                    multiple=multiple,
+                    known_date=multiple_known,
+                    metric_refs=multiple_refs,
+                    horizon=_add_years(analysis_date, 3),
+                    payoff_fact=final_payoff,
+                    row=row_number,
+                )
                 if verified_on < outcome_known:
                     raise ValueError(
                         f"source outcomes CSV row {row_number}: verified_on cannot precede outcome_known_date"
@@ -531,6 +658,7 @@ class CsvSourceBackedOutcomeIndex:
                     equity_multiple_3y_evidence_refs=multiple_refs,
                     company_terminal_fact=company_terminal,
                     common_terminal_fact=common_terminal,
+                    final_shareholder_payoff_fact=final_payoff,
                     industry_group=_optional(raw.get("industry_group")),
                     impairment_type=_optional(raw.get("impairment_type")),
                     leverage_bucket=_optional(raw.get("leverage_bucket")),
@@ -646,7 +774,8 @@ def compare_source_outcome_base_rates(
             "legacy rows without metric-specific provenance fall back to outcome_known_date plus the row-level evidence refs",
             "metric-specific known dates require metric-specific evidence refs so later evidence cannot be used to backdate knowledge",
             "early false survival/common/normalization outcomes are admitted only with explicit metric-matched terminal-event provenance; no event-type inference is performed from generic labels",
-            "three-year equity multiples remain horizon-bound until an explicit final shareholder-payoff model is implemented",
+            "three-year equity multiples may be admitted before the nominal horizon only when an explicit verified final shareholder-payoff fact fixes the complete payoff and matches the metric provenance",
+            "terminal common-survival facts and final shareholder-payoff facts remain separate evidence layers and are never inferred from one another",
             "group denominators expose both cohort_case_count and source_labeled_case_count so missing legal/business outcome coverage is not treated as failure",
             "no_fresh_credit is a coverage/liquidity category and must not be interpreted as healthy credit",
         ),
