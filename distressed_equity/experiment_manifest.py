@@ -90,6 +90,22 @@ def _data_config_payload(
     }
 
 
+def _git_output(repo_root: Path, *args: str) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=repo_root,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return completed.stdout
+
+
 def resolve_code_revision(explicit: str | None = None) -> tuple[str | None, str | None]:
     if explicit is not None:
         clean = explicit.strip()
@@ -102,19 +118,16 @@ def resolve_code_revision(explicit: str | None = None) -> tuple[str | None, str 
         return github_sha, "GITHUB_SHA"
 
     repo_root = Path(__file__).resolve().parents[1]
-    try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo_root,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError):
+    status = _git_output(repo_root, "status", "--porcelain", "--untracked-files=no")
+    if status is None or status.strip():
+        # A local HEAD does not identify the code actually executing when tracked
+        # files are modified/staged. In that state an exact code-bound fingerprint
+        # would be stronger than the evidence supports, so withhold it.
         return None, None
-    revision = completed.stdout.strip()
+    revision_output = _git_output(repo_root, "rev-parse", "HEAD")
+    if revision_output is None:
+        return None, None
+    revision = revision_output.strip()
     return (revision, "git") if revision else (None, None)
 
 
@@ -166,7 +179,7 @@ def build_experiment_manifest(
     warnings: list[str] = []
     if resolved_revision is None:
         warnings.append(
-            "code revision could not be resolved; data_config_fingerprint is valid but experiment_fingerprint is withheld"
+            "code revision could not be resolved to a clean exact source state; data_config_fingerprint is valid but experiment_fingerprint is withheld"
         )
         experiment_fingerprint = None
     else:
@@ -189,6 +202,28 @@ def build_experiment_manifest(
         experiment_fingerprint=experiment_fingerprint,
         warnings=tuple(warnings),
     )
+
+
+def verify_experiment_input_files_unchanged(manifest: ExperimentManifest) -> None:
+    """Verify input paths still contain exactly the bytes hashed into the manifest.
+
+    Population CLIs call this immediately after all six CSV-backed providers/indexes
+    finish their eager loads. A file replacement or in-place modification between
+    the initial hash pass and provider loading therefore fails loudly instead of
+    producing an output whose manifest describes different bytes than the analysis.
+    """
+
+    for item in manifest.input_files:
+        path = Path(item.path)
+        if not path.is_file():
+            raise ValueError(
+                f"experiment input changed during loading: {item.role} no longer exists at {path}"
+            )
+        size, digest = _sha256_file(path)
+        if size != item.size_bytes or digest != item.sha256:
+            raise ValueError(
+                f"experiment input changed during loading: {item.role} bytes no longer match the manifest hash"
+            )
 
 
 def experiment_manifest_from_dict(
