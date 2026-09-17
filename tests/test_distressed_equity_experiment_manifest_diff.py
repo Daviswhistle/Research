@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -80,6 +81,49 @@ def test_diff_separates_input_config_and_code_changes(tmp_path: Path):
     assert diff.input_changes[0].status == "content_changed"
     assert {item.path for item in diff.config_changes} == {"/min_drawdown", "/nested/window"}
     assert {item.status for item in diff.config_changes} == {"changed"}
+
+
+def test_diff_preserves_json_numeric_and_boolean_types(tmp_path: Path):
+    source = tmp_path / "input.csv"
+    source.write_text("x\n", encoding="utf-8")
+    before = _manifest(
+        source,
+        config={"integer": 1, "flag": True, "series": [1]},
+    )
+    after = _manifest(
+        source,
+        config={"integer": 1.0, "flag": 1, "series": [1.0]},
+    )
+
+    diff = compare_experiment_manifests(before, after)
+
+    assert diff.data_config_changed is True
+    assert diff.change_categories == ("config",)
+    assert {item.path for item in diff.config_changes} == {"/integer", "/flag", "/series"}
+    assert all(item.status == "changed" for item in diff.config_changes)
+
+
+def test_diff_with_unresolved_code_revision_does_not_guess_exact_identity(tmp_path: Path):
+    source = tmp_path / "input.csv"
+    source.write_text("x\n", encoding="utf-8")
+    complete = _manifest(source, revision="rev-a")
+    incomplete = replace(
+        complete,
+        code_revision=None,
+        code_revision_source=None,
+        reproducibility_complete=False,
+        experiment_fingerprint=None,
+        warnings=("code revision unavailable",),
+    )
+
+    diff = compare_experiment_manifests(complete, incomplete)
+
+    assert diff.data_config_changed is False
+    assert diff.code_revision_changed is True
+    assert diff.exact_experiment_comparable is False
+    assert diff.experiment_changed is None
+    assert diff.change_categories == ("code_revision",)
+    assert any("not comparable" in item for item in diff.warnings)
 
 
 def test_loader_accepts_nested_analysis_output_and_rejects_tampered_manifest(tmp_path: Path):
