@@ -8,9 +8,13 @@ from pathlib import Path
 from .credit_replay import CreditReplayConfig, CsvCreditIdentityIndex, run_joint_credit_replay
 from .csv_bond_market import CsvBondMarketProvider
 from .csv_market import CsvMarketProvider
-from .experiment_manifest import build_experiment_manifest, experiment_manifest_to_dict
+from .experiment_manifest import (
+    build_experiment_manifest,
+    experiment_manifest_to_dict,
+    verify_experiment_input_files_unchanged,
+)
 from .population_coverage import build_population_coverage_report, population_coverage_to_dict
-from .replay import DistressScanConfig, run_historical_replay
+from .replay import DistressScanConfig, normalize_exchange_filters, run_historical_replay
 from .source_outcomes import CsvSourceBackedOutcomeIndex
 from .survival_features import CsvSurvivalFeatureIndex
 
@@ -46,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--credit-spread-at-or-above", type=float, default=1000.0)
     parser.add_argument(
         "--code-revision",
-        help="Optional exact code revision for reproducibility; otherwise GITHUB_SHA then local git HEAD are attempted",
+        help="Optional exact code revision for reproducibility; otherwise GITHUB_SHA then a clean local git HEAD are attempted",
     )
     parser.add_argument("--output", "-o", help="JSON output; stdout when omitted")
     parser.add_argument("--markdown-output", help="Optional human-readable coverage report")
@@ -64,11 +68,16 @@ def _pct(value: float | None) -> str:
     return "—" if value is None else f"{value:.1%}"
 
 
-def _manifest_config(args: argparse.Namespace, analysis_dates: tuple[date, ...], coverage_cutoff: date) -> dict[str, object]:
+def _manifest_config(
+    args: argparse.Namespace,
+    analysis_dates: tuple[date, ...],
+    coverage_cutoff: date,
+    exchanges: tuple[str, ...],
+) -> dict[str, object]:
     return {
         "analysis_dates": [item.isoformat() for item in analysis_dates],
         "outcome_coverage_cutoff": coverage_cutoff.isoformat(),
-        "exchanges": sorted(set(args.exchange)),
+        "exchanges": list(exchanges),
         "min_drawdown": args.min_drawdown,
         "min_price": args.min_price,
         "lookback_years": args.lookback_years,
@@ -208,6 +217,7 @@ def main(argv: list[str] | None = None) -> int:
     coverage_cutoff = date.fromisoformat(args.outcome_coverage_cutoff)
     if any(item > coverage_cutoff for item in analysis_dates):
         raise ValueError("all analysis dates must be on or before --outcome-coverage-cutoff")
+    exchanges = normalize_exchange_filters(args.exchange)
 
     manifest = build_experiment_manifest(
         pipeline="population_coverage",
@@ -219,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
             "source_outcomes": args.source_outcomes_csv,
             "survival_features": args.survival_features_csv,
         },
-        config=_manifest_config(args, analysis_dates, coverage_cutoff),
+        config=_manifest_config(args, analysis_dates, coverage_cutoff, exchanges),
         code_revision=args.code_revision,
     )
 
@@ -228,11 +238,13 @@ def main(argv: list[str] | None = None) -> int:
     links = CsvCreditIdentityIndex(args.credit_links_csv)
     outcomes = CsvSourceBackedOutcomeIndex(args.source_outcomes_csv)
     features = CsvSurvivalFeatureIndex(args.survival_features_csv)
+    verify_experiment_input_files_unchanged(manifest)
+
     distress_config = DistressScanConfig(
         min_adjusted_drawdown=args.min_drawdown,
         lookback_years=args.lookback_years,
         min_raw_price=args.min_price,
-        exchanges=tuple(args.exchange),
+        exchanges=exchanges,
     )
     credit_config = CreditReplayConfig(
         lookback_days=args.credit_lookback_days,
