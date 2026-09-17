@@ -45,7 +45,7 @@ data_config_fingerprint
 + exact code revision
 ```
 
-Code revision을 찾지 못하면:
+Code revision을 exact source state로 확인하지 못하면:
 
 ```text
 reproducibility_complete = false
@@ -54,18 +54,30 @@ experiment_fingerprint = null
 
 로 둔다.
 
-코드 revision이 불명인데도 exact experiment identity를 발급하지 않는다.
+코드 revision이 불명확한데도 exact experiment identity를 발급하지 않는다.
 
 ## Code revision 탐색 순서
 
 ```text
 1. --code-revision
 2. GITHUB_SHA environment variable
-3. local git rev-parse HEAD
+3. clean local git HEAD
 4. unresolved
 ```
 
-실제 보존용 population run에서는 명시적으로:
+Local git fallback은 단순 `git rev-parse HEAD`만 믿지 않는다.
+
+먼저:
+
+```bash
+git status --porcelain --untracked-files=no
+```
+
+로 tracked working tree / index가 clean인지 확인한다. 수정 또는 staged change가 하나라도 있으면 실행 중인 코드가 `HEAD`와 동일하다고 볼 수 없으므로 local `HEAD`를 exact revision으로 쓰지 않고 `experiment_fingerprint`를 보류한다.
+
+`--code-revision`과 `GITHUB_SHA`는 호출 환경이 명시적으로 제공한 revision provenance로 취급한다.
+
+실제 보존용 population run에서는 가능하면 명시적으로:
 
 ```bash
 --code-revision <commit-sha>
@@ -107,6 +119,26 @@ sha256
 
 반대로 한 byte라도 바뀌면 fingerprint가 달라진다.
 
+### Hash와 실제 분석 bytes의 결합
+
+Population coverage와 prior calibration CLI는 단순히 파일을 한 번 hash하고 끝내지 않는다.
+
+Startup 순서는 다음과 같다.
+
+```text
+1. 6개 input CSV의 size/SHA-256을 manifest에 고정
+2. 모든 CSV-backed provider/index를 eager-load
+3. 같은 6개 파일을 즉시 다시 hash
+4. 최초 manifest hash와 byte-for-byte 일치 확인
+5. 일치한 경우에만 분석 진행
+```
+
+따라서 최초 hash 뒤 provider가 파일을 읽기 전에 파일이 교체되거나, startup 중 in-place write가 발생해 최종 bytes가 달라지면 분석을 계속하지 않고 오류를 낸다.
+
+이 검증은 provider들이 생성자에서 입력을 메모리로 eager-load한다는 현재 계약과 결합되어 있다. Provider load가 끝난 뒤 분석 단계에서는 CSV 파일을 다시 읽어 서로 다른 시점의 bytes를 섞지 않는다.
+
+운영에서는 여전히 **immutable input snapshot**을 쓰는 것을 권장한다. 이중 hash는 startup race를 탐지하는 방어막이지, 동시에 수정되는 mutable vendor file을 안정적인 연구 snapshot으로 바꿔 주는 기능은 아니다.
+
 ## Population coverage manifest
 
 `population_coverage_cli`는 다음 6개 input role을 해시한다.
@@ -137,6 +169,29 @@ credit_yield_at_or_above
 credit_spread_at_or_above
 ```
 
+`exchanges`는 replay가 실제 사용하는 case-insensitive 의미와 동일하게 먼저 정규화한다.
+
+```text
+upper-case
+remove duplicates
+sort
+```
+
+따라서 다음 두 입력은 같은 behavioral/config identity다.
+
+```text
+--exchange nyse
+--exchange NYSE --exchange nyse
+```
+
+둘 다 manifest와 `DistressScanConfig`에서:
+
+```json
+["NYSE"]
+```
+
+로 사용된다.
+
 JSON output:
 
 ```text
@@ -147,7 +202,7 @@ Markdown header에도 experiment/data-config fingerprint와 code revision이 표
 
 ## Prior calibration manifest
 
-`prior_calibration_cli`도 같은 6개 input role을 해시한다.
+`prior_calibration_cli`도 같은 6개 input role을 해시하고 같은 exchange normalization 및 startup byte-stability 검증을 적용한다.
 
 추가 config identity:
 
@@ -177,7 +232,7 @@ NaN/Infinity disallowed
 
 Input role도 정렬하므로 CLI argument 순서가 fingerprint에 영향을 주지 않는다.
 
-Config list처럼 순서 자체에 의미가 있는 값은 순서를 보존한다.
+행동 의미가 case-insensitive/set-like인 exchange filter처럼 명시적으로 정규화된 옵션은 정규화 후 fingerprint한다. 반대로 config list처럼 순서 자체에 의미가 있는 값은 순서를 보존한다.
 
 예를 들어 `feature_dimensions` 순서를 바꾸면 다른 config identity로 취급한다.
 
@@ -211,7 +266,7 @@ expected data_config_fingerprint + code revision
 
 `path`, 표시용 warnings 같은 audit metadata 자체는 canonical experiment identity가 아니므로 fingerprint에 포함되지 않는다.
 
-이 검증은 **현재 filesystem의 file bytes를 다시 읽는 검증은 아니다**. Manifest의 identity-bearing 주장이 자기 fingerprint와 일치하는지 검증하는 단계다. 실제 재현에는 manifest에 적힌 SHA-256과 동일한 input snapshot을 별도로 보존해야 한다.
+Serialized-manifest 검증은 **현재 filesystem의 file bytes를 다시 읽는 검증은 아니다**. Manifest의 identity-bearing 주장이 자기 fingerprint와 일치하는지 검증하는 단계다. 실제 run startup에서는 별도로 위의 eager-load 전후 byte-stability 검증을 수행하며, 장기 재현에는 manifest에 적힌 SHA-256과 동일한 immutable input snapshot을 별도로 보존해야 한다.
 
 ## Experiment manifest diff
 
@@ -311,7 +366,7 @@ experiment_changed = true
 
 가 된다.
 
-반대로 code revision을 한쪽이라도 알 수 없으면:
+반대로 code revision을 한쪽이라도 exact source state로 알 수 없으면:
 
 ```text
 exact_experiment_comparable = false
@@ -331,14 +386,17 @@ licensed dataset의 법적 entitlement
 upstream vendor의 내부 생성 과정
 OS / Python / dependency lock 전체 환경
 외부 API response의 장기 재현성
+untracked local source/code files의 영향
 ```
+
+Local git fallback의 clean check는 tracked working tree/index를 대상으로 한다. 연구 코드가 repository 밖의 파일이나 untracked source를 runtime에 import하는 별도 구조라면 명시 `--code-revision`만으로 그 환경 전체를 증명할 수는 없다.
 
 현재 목적은 repository의 population research 결과끼리 최소한 다음을 정확히 구분하는 것이다.
 
 ```text
 같은 input bytes인가?
 같은 research config인가?
-같은 code revision인가?
+같은 code revision provenance인가?
 ```
 
 필요해지면 차기 단계에서 dependency/environment lock fingerprint를 추가할 수 있다.
@@ -351,7 +409,7 @@ OS / Python / dependency lock 전체 환경
 experiment_manifest
 coverage report
 calibration report
-source input files 또는 vendor snapshot identifiers
+immutable source input files 또는 vendor snapshot identifiers
 commit SHA
 ```
 
