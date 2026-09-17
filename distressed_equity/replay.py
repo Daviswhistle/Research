@@ -52,6 +52,12 @@ class ReplayRun:
     survivorship_guard: str
 
 
+def normalize_exchange_filters(values: Iterable[str]) -> tuple[str, ...]:
+    """Canonicalize exchange filters with the same case-insensitive semantics as replay."""
+
+    return tuple(sorted({str(item).upper() for item in values}))
+
+
 def _eligible_security(
     security: SecurityIdentity,
     config: DistressScanConfig,
@@ -65,7 +71,7 @@ def _eligible_security(
             return False
     if config.exchanges:
         exchange = (security.exchange or "").upper()
-        if exchange not in {item.upper() for item in config.exchanges}:
+        if exchange not in normalize_exchange_filters(config.exchanges):
             return False
     return True
 
@@ -149,26 +155,17 @@ def run_historical_replay(
     candidates: list[MarketDistressSeed] = []
     skipped: list[ReplaySkip] = []
     for security in eligible:
-        seed, reason = scan_security(provider, security, analysis_date, config)
-        if seed is not None:
-            candidates.append(seed)
+        candidate, reason = scan_security(provider, security, analysis_date, config)
+        if candidate is not None:
+            candidates.append(candidate)
         else:
             skipped.append(
                 ReplaySkip(
                     security_id=security.security_id,
                     symbol=security.symbol,
-                    reason=reason or "not selected",
+                    reason=reason or "unknown",
                 )
             )
-
-    candidates.sort(
-        key=lambda seed: (-seed.adjusted_drawdown_from_peak, seed.security.symbol)
-    )
-    guard = (
-        "Universe was requested from the provider as of the analysis date; current-active membership was not substituted."
-        if survivorship_safe
-        else "WARNING: provider lacks point-in-time membership dates; replay was explicitly allowed in survivorship-unsafe mode."
-    )
     return ReplayRun(
         provider=provider.name,
         analysis_date=analysis_date,
@@ -176,73 +173,43 @@ def run_historical_replay(
         scanned_security_count=len(eligible),
         candidates=tuple(candidates),
         skipped=tuple(skipped),
-        survivorship_guard=guard,
+        survivorship_guard=(
+            "point-in-time membership used; current-active security membership was not substituted"
+            if survivorship_safe
+            else "WARNING: provider universe lacks point-in-time membership provenance; current-survivor bias may be present"
+        ),
     )
 
 
 def seed_to_dict(seed: MarketDistressSeed) -> dict[str, object]:
-    payload = asdict(seed)
-    payload["analysis_date"] = seed.analysis_date.isoformat()
-    payload["lookback_start"] = seed.lookback_start.isoformat()
-    payload["security"]["start_date"] = (
-        seed.security.start_date.isoformat() if seed.security.start_date else None
+    return {
+        "security": asdict(seed.security),
+        "analysis_date": seed.analysis_date.isoformat(),
+        "raw_price": asdict(seed.raw_price),
+        "adjusted_price": asdict(seed.adjusted_price),
+        "peak_adjusted_price": asdict(seed.peak_adjusted_price),
+        "adjusted_drawdown_from_peak": seed.adjusted_drawdown_from_peak,
+        "lookback_start": seed.lookback_start.isoformat(),
+    }
+
+
+def replay_run_to_dict(run: ReplayRun) -> dict[str, object]:
+    output = asdict(run)
+    output["analysis_date"] = run.analysis_date.isoformat()
+    output["candidates"] = [seed_to_dict(seed) for seed in run.candidates]
+    return output
+
+
+def clone_replay_with_candidates(
+    run: ReplayRun,
+    candidates: Iterable[MarketDistressSeed],
+) -> ReplayRun:
+    return ReplayRun(
+        provider=run.provider,
+        analysis_date=run.analysis_date,
+        historical_universe_size=run.historical_universe_size,
+        scanned_security_count=run.scanned_security_count,
+        candidates=tuple(deepcopy(tuple(candidates))),
+        skipped=run.skipped,
+        survivorship_guard=run.survivorship_guard,
     )
-    payload["security"]["end_date"] = (
-        seed.security.end_date.isoformat() if seed.security.end_date else None
-    )
-    for key in ("raw_price", "adjusted_price", "peak_adjusted_price"):
-        payload[key]["date"] = payload[key]["date"].isoformat()
-    return payload
-
-
-def apply_market_seed_to_prefill(
-    research_packet: dict[str, object],
-    seed: MarketDistressSeed,
-) -> dict[str, object]:
-    """Merge market facts into a SEC prefill without inventing missing accounting data."""
-
-    packet = deepcopy(research_packet)
-    draft = packet.get("screening_candidate_draft")
-    if not isinstance(draft, dict):
-        raise ValueError("research packet lacks screening_candidate_draft")
-    capital = draft.get("capital_structure")
-    if not isinstance(capital, dict):
-        raise ValueError("screening candidate draft lacks capital_structure")
-
-    capital["current_price"] = seed.raw_price.close
-    draft["price_drawdown_from_peak"] = seed.adjusted_drawdown_from_peak
-    draft["price_drawdown_adjusted"] = True
-    metadata = draft.setdefault("metadata", {})
-    if isinstance(metadata, dict):
-        metadata["market_replay"] = {
-            "provider": seed.security.provider,
-            "security_id": seed.security.security_id,
-            "raw_price_date": seed.raw_price.date.isoformat(),
-            "adjusted_price_date": seed.adjusted_price.date.isoformat(),
-            "peak_adjusted_price": seed.peak_adjusted_price.close,
-            "peak_adjusted_price_date": seed.peak_adjusted_price.date.isoformat(),
-            "drawdown_basis": "split/dividend-adjusted price; not market-cap drawdown",
-        }
-
-    shares = capital.get("current_shares")
-    if isinstance(shares, (int, float)) and shares > 0:
-        packet.setdefault("market_context", {})
-        market_context = packet["market_context"]
-        if isinstance(market_context, dict):
-            market_context["cutoff_market_cap"] = seed.raw_price.close * float(shares)
-    packet.setdefault("market_context", {})
-    market_context = packet["market_context"]
-    if isinstance(market_context, dict):
-        market_context.update(seed_to_dict(seed))
-
-    unresolved = packet.get("unresolved_required_fields")
-    if isinstance(unresolved, list):
-        unresolved[:] = [
-            item
-            for item in unresolved
-            if item != "point-in-time share price and peak market capitalization"
-        ]
-        unresolved.append(
-            "prior peak market capitalization remains unresolved; adjusted price drawdown is only a distress proxy"
-        )
-    return packet
