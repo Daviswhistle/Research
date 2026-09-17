@@ -69,6 +69,8 @@ def test_population_coverage_cli_exposes_missing_credit_outcome_feature_and_eval
         "--bond-observations-csv", str(bonds),
         "--source-outcomes-csv", str(outcomes),
         "--survival-features-csv", str(features),
+        "--exchange", "nyse",
+        "--exchange", "NYSE",
         "--code-revision", "test-rev",
         "--output", str(output),
         "--markdown-output", str(markdown),
@@ -87,6 +89,7 @@ def test_population_coverage_cli_exposes_missing_credit_outcome_feature_and_eval
     }
     assert manifest["config"]["analysis_dates"] == ["2018-12-31", "2020-12-31"]
     assert manifest["config"]["outcome_coverage_cutoff"] == "2022-12-31"
+    assert manifest["config"]["exchanges"] == ["NYSE"]
 
     assert payload["analysis_dates"] == ["2018-12-31", "2020-12-31"]
     assert payload["total_case_observations"] == 2
