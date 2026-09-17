@@ -83,6 +83,29 @@ def _pointer_token(value: object) -> str:
     return str(value).replace("~", "~0").replace("/", "~1")
 
 
+def _same_json_value(left: object, right: object) -> bool:
+    """Compare JSON values with the same type-sensitive semantics as fingerprints.
+
+    Python equality intentionally collapses some distinct JSON values (for example
+    1 == 1.0 and True == 1). Canonical experiment identity does not, so the diff
+    layer must compare canonical JSON representations rather than Python values.
+    """
+
+    return json.dumps(
+        left,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ) == json.dumps(
+        right,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
 def _config_changes(
     before: Mapping[str, object],
     after: Mapping[str, object],
@@ -106,7 +129,7 @@ def _config_changes(
         right = after[key]
         if isinstance(left, dict) and isinstance(right, dict):
             output.extend(_config_changes(left, right, prefix=path))
-        elif left != right:
+        elif not _same_json_value(left, right):
             output.append(
                 ExperimentConfigChange(path=path, status="changed", before=left, after=right)
             )
