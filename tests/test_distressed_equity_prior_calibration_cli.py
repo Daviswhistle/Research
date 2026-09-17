@@ -79,6 +79,8 @@ def test_prior_calibration_cli_replays_grid_and_scores_ex_ante_priors(tmp_path: 
         "--bond-observations-csv", str(bonds),
         "--source-outcomes-csv", str(outcomes),
         "--survival-features-csv", str(features),
+        "--exchange", "nyse",
+        "--exchange", "NYSE",
         "--feature-dimensions", "liquidity_runway",
         "--calibration-bin-width", "0.5",
         "--code-revision", "test-rev",
@@ -96,6 +98,7 @@ def test_prior_calibration_cli_replays_grid_and_scores_ex_ante_priors(tmp_path: 
     assert len(manifest["experiment_fingerprint"]) == 64
     assert manifest["config"]["analysis_dates"] == ["2018-12-31", "2020-12-31", "2022-12-31"]
     assert manifest["config"]["evaluation_cutoff"] == "2024-12-31"
+    assert manifest["config"]["exchanges"] == ["NYSE"]
     assert manifest["config"]["feature_dimensions"] == ["liquidity_runway"]
     assert manifest["config"]["stability_dimensions"] == [
         "target_date", "target_year", "credit_group", "calibration_n_band", "basis_bucket"
