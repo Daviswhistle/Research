@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,6 +9,7 @@ import distressed_equity.experiment_manifest as manifest_module
 from distressed_equity.experiment_manifest import (
     build_experiment_manifest,
     experiment_manifest_to_dict,
+    verify_experiment_input_files_unchanged,
 )
 
 
@@ -124,6 +126,73 @@ def test_manifest_withholds_exact_experiment_fingerprint_when_code_revision_unkn
     assert manifest.experiment_fingerprint is None
     assert manifest.data_config_fingerprint
     assert any("experiment_fingerprint is withheld" in item for item in manifest.warnings)
+
+
+def test_manifest_withholds_git_fallback_when_tracked_worktree_is_dirty(tmp_path: Path, monkeypatch):
+    source = tmp_path / "input.csv"
+    source.write_text("x\n", encoding="utf-8")
+    monkeypatch.delenv("GITHUB_SHA", raising=False)
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        assert command[:2] == ["git", "status"]
+        return SimpleNamespace(stdout=" M distressed_equity/experiment_manifest.py\n")
+
+    monkeypatch.setattr(manifest_module.subprocess, "run", fake_run)
+    manifest = build_experiment_manifest(
+        pipeline="population_coverage",
+        input_files={"input": source},
+        config={"cutoff": "2022-12-31"},
+    )
+
+    assert len(calls) == 1
+    assert manifest.code_revision is None
+    assert manifest.code_revision_source is None
+    assert manifest.reproducibility_complete is False
+    assert manifest.experiment_fingerprint is None
+    assert any("clean exact source state" in item for item in manifest.warnings)
+
+
+def test_manifest_accepts_clean_git_fallback(tmp_path: Path, monkeypatch):
+    source = tmp_path / "input.csv"
+    source.write_text("x\n", encoding="utf-8")
+    monkeypatch.delenv("GITHUB_SHA", raising=False)
+
+    def fake_run(command, **kwargs):
+        if command[1] == "status":
+            return SimpleNamespace(stdout="")
+        if command[1] == "rev-parse":
+            return SimpleNamespace(stdout="abc123\n")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(manifest_module.subprocess, "run", fake_run)
+    manifest = build_experiment_manifest(
+        pipeline="population_coverage",
+        input_files={"input": source},
+        config={"cutoff": "2022-12-31"},
+    )
+
+    assert manifest.code_revision == "abc123"
+    assert manifest.code_revision_source == "git"
+    assert manifest.reproducibility_complete is True
+    assert manifest.experiment_fingerprint is not None
+
+
+def test_manifest_verifies_hashed_inputs_remain_unchanged_through_loading(tmp_path: Path):
+    source = tmp_path / "input.csv"
+    source.write_text("before\n", encoding="utf-8")
+    manifest = build_experiment_manifest(
+        pipeline="population_coverage",
+        input_files={"input": source},
+        config={},
+        code_revision="rev",
+    )
+
+    verify_experiment_input_files_unchanged(manifest)
+    source.write_text("after\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="input changed during loading: input"):
+        verify_experiment_input_files_unchanged(manifest)
 
 
 def test_manifest_validates_roles_files_and_config_serialization(tmp_path: Path):
