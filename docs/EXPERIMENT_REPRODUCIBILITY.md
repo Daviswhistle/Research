@@ -181,6 +181,133 @@ Config list처럼 순서 자체에 의미가 있는 값은 순서를 보존한�
 
 예를 들어 `feature_dimensions` 순서를 바꾸면 다른 config identity로 취급한다.
 
+## Serialized manifest 무결성 검증
+
+`experiment_manifest_from_dict()`는 저장된 manifest를 다시 읽을 때 구조만 믿지 않는다.
+
+다음을 재계산한다.
+
+```text
+serialized input role/size/hash + config + pipeline
+    -> expected data_config_fingerprint
+
+expected data_config_fingerprint + code revision
+    -> expected experiment_fingerprint
+```
+
+저장된 fingerprint와 재계산 값이 다르면 manifest를 거부한다.
+
+즉 JSON의 config나 input hash를 손으로 바꾸고 기존 fingerprint를 그대로 두는 방식은 비교 단계에 들어가기 전에 실패한다.
+
+이 검증은 **현재 filesystem의 file bytes를 다시 읽는 검증은 아니다**. Manifest 자체가 자기 주장과 일치하는지 검증하는 단계다. 실제 재현에는 manifest에 적힌 SHA-256과 동일한 input snapshot을 별도로 보존해야 한다.
+
+## Experiment manifest diff
+
+두 population 결과를 비교할 때는:
+
+```bash
+distressed-equity-experiment-diff \
+  before.json \
+  after.json \
+  --output diff.json \
+  --markdown-output diff.md
+```
+
+를 사용할 수 있다.
+
+입력은 다음 둘 다 허용한다.
+
+```text
+manifest 자체 JSON
+analysis output 안의 experiment_manifest
+```
+
+비교 전에 양쪽 manifest fingerprint 무결성을 모두 재검증한다.
+
+그 뒤 차이를 다음 계층으로 분리한다.
+
+```text
+pipeline
+input_content
+config
+code_revision
+input_path_only
+```
+
+### input_content
+
+Role별로:
+
+```text
+added
+removed
+content_changed
+unchanged
+```
+
+를 구분한다.
+
+Content identity는 `size_bytes + sha256`로 비교한다.
+
+### input_path_only
+
+Bytes와 role은 동일하지만 audit path만 바뀐 경우다.
+
+```text
+/path/a/prices.csv
+/path/b/renamed.csv
+```
+
+처럼 위치만 달라졌다면 `path_only_changed`로 보고한다.
+
+이 변화는 사람이 실행 환경을 추적하는 데는 유용하지만 `data_config_fingerprint`와 `experiment_fingerprint`를 바꾸지 않는다.
+
+### config
+
+Config object는 nested mapping을 JSON Pointer 형태로 분해한다.
+
+예:
+
+```text
+/min_drawdown
+/nested/window
+```
+
+각 항목은:
+
+```text
+added
+removed
+changed
+```
+
+로 나온다.
+
+List는 순서 자체가 config 의미에 포함되므로 list 내부 element 단위가 아니라 해당 config path 값 전체의 변경으로 취급한다.
+
+### code_revision
+
+Data/config가 같고 code revision만 다르면:
+
+```text
+data_config_changed = false
+code_revision_changed = true
+experiment_changed = true
+```
+
+가 된다.
+
+반대로 code revision을 한쪽이라도 알 수 없으면:
+
+```text
+exact_experiment_comparable = false
+experiment_changed = null
+```
+
+이다.
+
+불완전한 manifest끼리 exact experiment equality를 추측하지 않는다.
+
 ## 무엇을 보장하지 않는가
 
 Manifest는 다음을 자동 보장하지 않는다.
@@ -214,7 +341,7 @@ source input files 또는 vendor snapshot identifiers
 commit SHA
 ```
 
-같은 `experiment_fingerprint`가 아니면 결과 숫자를 직접 전후 비교할 때 먼저 변경 원인을 확인한다.
+같은 `experiment_fingerprint`가 아니면 결과 숫자를 직접 전후 비교할 때 먼저 `distressed-equity-experiment-diff`로 변경 원인을 분해한다.
 
 ## 왜 투자 연구에 중요한가
 
@@ -230,4 +357,4 @@ T0 feature bucket rule changed
 
 이런 변경이 base rate와 Brier를 바꿀 수 있다.
 
-Reproducibility manifest는 “결과가 달라졌다”를 곧바로 투자 논리 변화로 오해하지 않고, 먼저 데이터/config/code change인지 추적하게 하는 provenance 계층이다.
+Reproducibility manifest와 manifest diff는 “결과가 달라졌다”를 곧바로 투자 논리 변화로 오해하지 않고, 먼저 데이터/config/code change인지 추적하게 하는 provenance 계층이다.
