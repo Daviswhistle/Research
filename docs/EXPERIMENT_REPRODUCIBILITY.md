@@ -181,6 +181,16 @@ Config list처럼 순서 자체에 의미가 있는 값은 순서를 보존한�
 
 예를 들어 `feature_dimensions` 순서를 바꾸면 다른 config identity로 취급한다.
 
+JSON type도 identity의 일부다.
+
+```text
+1    != 1.0
+true != 1
+[1]  != [1.0]
+```
+
+Python equality에서는 일부가 같게 비교되지만 manifest fingerprint와 diff는 canonical JSON 표현을 사용해 이 차이를 보존한다.
+
 ## Serialized manifest 무결성 검증
 
 `experiment_manifest_from_dict()`는 저장된 manifest를 다시 읽을 때 구조만 믿지 않는다.
@@ -197,9 +207,11 @@ expected data_config_fingerprint + code revision
 
 저장된 fingerprint와 재계산 값이 다르면 manifest를 거부한다.
 
-즉 JSON의 config나 input hash를 손으로 바꾸고 기존 fingerprint를 그대로 두는 방식은 비교 단계에 들어가기 전에 실패한다.
+즉 JSON의 config나 input hash처럼 canonical identity에 포함되는 값을 바꾸고 기존 fingerprint를 그대로 두는 방식은 비교 단계에 들어가기 전에 실패한다.
 
-이 검증은 **현재 filesystem의 file bytes를 다시 읽는 검증은 아니다**. Manifest 자체가 자기 주장과 일치하는지 검증하는 단계다. 실제 재현에는 manifest에 적힌 SHA-256과 동일한 input snapshot을 별도로 보존해야 한다.
+`path`, 표시용 warnings 같은 audit metadata 자체는 canonical experiment identity가 아니므로 fingerprint에 포함되지 않는다.
+
+이 검증은 **현재 filesystem의 file bytes를 다시 읽는 검증은 아니다**. Manifest의 identity-bearing 주장이 자기 fingerprint와 일치하는지 검증하는 단계다. 실제 재현에는 manifest에 적힌 SHA-256과 동일한 input snapshot을 별도로 보존해야 한다.
 
 ## Experiment manifest diff
 
@@ -282,6 +294,8 @@ changed
 ```
 
 로 나온다.
+
+Scalar/list 비교도 Python `==`가 아니라 canonical JSON 표현으로 한다. 따라서 숫자·boolean type이 fingerprint에서는 달라졌는데 diff에서는 같다고 처리되는 불일치를 만들지 않는다.
 
 List는 순서 자체가 config 의미에 포함되므로 list 내부 element 단위가 아니라 해당 config path 값 전체의 변경으로 취급한다.
 
