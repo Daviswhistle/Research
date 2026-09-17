@@ -13,9 +13,13 @@ from .calibration_stability import (
 from .credit_replay import CreditReplayConfig, CsvCreditIdentityIndex, JointReplayRun, run_joint_credit_replay
 from .csv_bond_market import CsvBondMarketProvider
 from .csv_market import CsvMarketProvider
-from .experiment_manifest import build_experiment_manifest, experiment_manifest_to_dict
+from .experiment_manifest import (
+    build_experiment_manifest,
+    experiment_manifest_to_dict,
+    verify_experiment_input_files_unchanged,
+)
 from .prior_calibration import PriorCalibrationReport, evaluate_walk_forward_priors, prior_calibration_to_dict
-from .replay import DistressScanConfig, run_historical_replay
+from .replay import DistressScanConfig, normalize_exchange_filters, run_historical_replay
 from .source_outcomes import CsvSourceBackedOutcomeIndex
 from .survival_features import CsvSurvivalFeatureIndex
 from .walk_forward_priors import WalkForwardPriorRun, build_walk_forward_priors
@@ -97,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--code-revision",
-        help="Optional exact code revision for reproducibility; otherwise GITHUB_SHA then local git HEAD are attempted",
+        help="Optional exact code revision for reproducibility; otherwise GITHUB_SHA then a clean local git HEAD are attempted",
     )
     parser.add_argument("--output", "-o", help="JSON output; stdout when omitted")
     parser.add_argument("--markdown-output", help="Optional human-readable calibration summary")
@@ -124,11 +128,12 @@ def _manifest_config(
     evaluation_cutoff: date,
     feature_dimensions: tuple[str, ...],
     stability_dimensions: tuple[str, ...],
+    exchanges: tuple[str, ...],
 ) -> dict[str, object]:
     return {
         "analysis_dates": [item.isoformat() for item in analysis_dates],
         "evaluation_cutoff": evaluation_cutoff.isoformat(),
-        "exchanges": sorted(set(args.exchange)),
+        "exchanges": list(exchanges),
         "min_drawdown": args.min_drawdown,
         "min_price": args.min_price,
         "lookback_years": args.lookback_years,
@@ -265,6 +270,7 @@ def main(argv: list[str] | None = None) -> int:
     evaluation_cutoff = date.fromisoformat(args.evaluation_cutoff)
     feature_dimensions = _dimensions(args.feature_dimensions, option="--feature-dimensions")
     stability_dimensions = _dimensions(args.stability_dimensions, option="--stability-dimensions")
+    exchanges = normalize_exchange_filters(args.exchange)
 
     manifest = build_experiment_manifest(
         pipeline="prior_calibration",
@@ -282,6 +288,7 @@ def main(argv: list[str] | None = None) -> int:
             evaluation_cutoff,
             feature_dimensions,
             stability_dimensions,
+            exchanges,
         ),
         code_revision=args.code_revision,
     )
@@ -291,12 +298,13 @@ def main(argv: list[str] | None = None) -> int:
     links = CsvCreditIdentityIndex(args.credit_links_csv)
     outcomes = CsvSourceBackedOutcomeIndex(args.source_outcomes_csv)
     features = CsvSurvivalFeatureIndex(args.survival_features_csv)
+    verify_experiment_input_files_unchanged(manifest)
 
     distress_config = DistressScanConfig(
         min_adjusted_drawdown=args.min_drawdown,
         lookback_years=args.lookback_years,
         min_raw_price=args.min_price,
-        exchanges=tuple(args.exchange),
+        exchanges=exchanges,
     )
     credit_config = CreditReplayConfig(
         lookback_days=args.credit_lookback_days,
