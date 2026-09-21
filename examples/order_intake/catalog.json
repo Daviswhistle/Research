@@ -1,0 +1,10 @@
+{
+  "SKU-A": {
+    "price": "12.50",
+    "inventory": 100
+  },
+  "SKU-B": {
+    "price": "9.00",
+    "inventory": 5
+  }
+}
