@@ -21,9 +21,10 @@ test = [
 
 [project.scripts]
 transformation-scanner = "transformation_scanner.cli:main"
+opportunity-scanner = "opportunity_scanner.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["transformation_scanner*", "research_pipeline*"]
+include = ["transformation_scanner*", "research_pipeline*", "opportunity_scanner*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
