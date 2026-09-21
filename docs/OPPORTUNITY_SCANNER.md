@@ -61,3 +61,27 @@ The default minimum independent revenue-signal count is two.
 4. Historical bounty benchmark runner
 
 The final winner is determined by validated economic profit, not by prior scores.
+
+
+## First experiment implementation
+
+The branch also includes a deterministic exception-first order-intake demo.
+
+An LLM or document parser may extract fields upstream, but the final decision to create a draft order is gated by ordinary code. The demo checks:
+
+- duplicate purchase-order numbers
+- unknown or missing SKUs
+- invalid quantities
+- catalog-price mismatches
+- insufficient inventory
+- missing customer/currency/line data
+
+Run a clean fixture:
+
+    python -m opportunity_scanner.order_intake_demo --order examples/order_intake/po_clean.json --catalog examples/order_intake/catalog.json
+
+Run the exception fixture:
+
+    python -m opportunity_scanner.order_intake_demo --order examples/order_intake/po_bad.json --catalog examples/order_intake/catalog.json --seen-pos examples/order_intake/seen_po_numbers.json
+
+The bad fixture is expected to exit with code 2 and return needs_review. That is intentional: uncertain or inconsistent orders are quarantined instead of being written into Shopify/ERP.
