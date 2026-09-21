@@ -1,0 +1,22 @@
+{
+  "purchase_order_number": "PO-0999",
+  "customer_id": "CUST-42",
+  "currency": "USD",
+  "lines": [
+    {
+      "sku": "SKU-A",
+      "quantity": 10,
+      "unit_price": "11.00"
+    },
+    {
+      "sku": "SKU-B",
+      "quantity": 9,
+      "unit_price": "9.00"
+    },
+    {
+      "sku": "SKU-X",
+      "quantity": 1,
+      "unit_price": "5.00"
+    }
+  ]
+}
