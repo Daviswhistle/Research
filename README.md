@@ -24,6 +24,18 @@ research queue
 
 자세한 설계와 의도적으로 제외한 범위는 [`docs/RESEARCH_PIPELINE.md`](docs/RESEARCH_PIPELINE.md)를 참고하세요.
 
+## Opportunity Scanner
+
+특정 수익모델을 먼저 고르지 않고, 실제 돈이 흐르는 메커니즘을 독립 증거·검증비용·피드백 속도·자동화 적합도·위험 축으로 분리해 비교하는 실험 탐색기입니다.
+
+첫 seed는 B2B order-intake/exception handling, automation reliability, prediction-market market making, authorized bug bounty, creator-fee token issuance를 같은 파이프라인에서 비교합니다. 하나의 임의 합산점수 대신 Pareto layer로 다음 실험을 고릅니다.
+
+실행 예:
+
+    python -m opportunity_scanner --input examples/opportunities_2026-09-21.jsonl --limit 3
+
+설계와 첫 스캔 근거는 docs/OPPORTUNITY_SCANNER.md를 참고하세요.
+
 ## DART 변신기업 탐색기
 
 가격이 오른 종목을 뒤쫓는 대신, **공시 전후로 상장사의 경제적 성격이 달라지는 순간**을 조기에 찾는 연구 도구입니다.
