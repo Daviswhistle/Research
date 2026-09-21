@@ -86,4 +86,26 @@ Run the exception fixture:
 
 The bad fixture is expected to exit with code 2 and return needs_review. That is intentional: uncertain or inconsistent orders are quarantined instead of being written into Shopify/ERP.
 
+## Email intake (first step toward the buyer brief)
+
+`opportunity_scanner/order_intake_email.py` parses a plain-text order email
+(`.txt`, or the text/plain part of `.eml`) into the order dict, then runs the
+same deterministic gate. The email format is strict and documented in the
+module (`PO:`/`Customer:`/`Currency:` headers, `SKU x QTY @ PRICE` lines).
+
+- Pure pleasantries (greetings, thanks) are ignored. Everything else that is
+  not a header or an item line is an `unparseable_line` exception — including
+  instructions the system cannot fulfill ("expedite", "call me").
+- Any parse exception forces `needs_review`, even if the parsed lines would
+  otherwise validate. HTML-only mail and unreadable files quarantine the same way.
+- The email subject is intentionally ignored in v0; the PO must be in the body.
+
+Run a clean email:
+
+    python -m opportunity_scanner.order_intake_email --email examples/order_intake/email_clean.txt --catalog examples/order_intake/catalog.json
+
+Run the exception email:
+
+    python -m opportunity_scanner.order_intake_email --email examples/order_intake/email_bad.txt --catalog examples/order_intake/catalog.json
+
 Quarantine semantics: `order_total` sums only fully clean lines. Lines with per-line exceptions move to `quarantined_lines` (with per-line `reasons`) and sum to `quarantined_total`, so a needs_review order never presents a spendable total that mixes good and bad lines.

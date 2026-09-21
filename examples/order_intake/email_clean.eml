@@ -1,0 +1,15 @@
+From: buyer@example.com
+To: orders@example.com
+Subject: PO-1002
+Content-Type: text/plain; charset="utf-8"
+
+Hi team,
+
+PO: PO-1002
+Customer: CUST-42
+Currency: USD
+
+SKU-A x 10 @ 12.50
+SKU-B x 2 @ 9.00
+
+Thanks!
