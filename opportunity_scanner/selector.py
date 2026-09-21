@@ -44,6 +44,7 @@ class ParetoLayerSelector:
             candidate.scores.get("feasibility_floor", 0.0),
             candidate.scores.get("evidence_quality", 0.0),
             candidate.scores.get("cash_ease", 0.0),
+            candidate.scores.get("human_ease", 0.0),
             candidate.scores.get("feedback_speed", 0.0),
             candidate.candidate_id,
         )

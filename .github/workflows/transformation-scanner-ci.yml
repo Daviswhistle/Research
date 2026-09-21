@@ -6,12 +6,16 @@ on:
       - main
     paths:
       - "transformation_scanner/**"
+      - "opportunity_scanner/**"
+      - "research_pipeline/**"
       - "tests/**"
       - "pyproject.toml"
       - ".github/workflows/transformation-scanner-ci.yml"
   pull_request:
     paths:
       - "transformation_scanner/**"
+      - "opportunity_scanner/**"
+      - "research_pipeline/**"
       - "tests/**"
       - "pyproject.toml"
       - ".github/workflows/transformation-scanner-ci.yml"
@@ -32,6 +36,6 @@ jobs:
       - name: Install package and test dependencies
         run: python -m pip install --upgrade pip && python -m pip install -e ".[test]"
       - name: Compile package
-        run: python -m compileall -q transformation_scanner
+        run: python -m compileall -q transformation_scanner opportunity_scanner research_pipeline
       - name: Run tests
         run: python -m pytest

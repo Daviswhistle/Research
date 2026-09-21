@@ -25,7 +25,7 @@ The JSONL input separates:
 
 The default selector does not collapse these into one opaque score. It builds Pareto layers over demand strength, evidence quality, automation fit, distribution access, cheap cash validation, feedback speed, and safety.
 
-Within a Pareto frontier it uses an explicit lexicographic tie-break: weakest-link feasibility, direct revenue evidence, cash ease, then feedback speed.
+Within a Pareto frontier it uses an explicit lexicographic tie-break: weakest-link feasibility, direct revenue evidence, cash ease, human ease, then feedback speed.
 
 ## First scan: 2026-09-21
 
@@ -85,3 +85,5 @@ Run the exception fixture:
     python -m opportunity_scanner.order_intake_demo --order examples/order_intake/po_bad.json --catalog examples/order_intake/catalog.json --seen-pos examples/order_intake/seen_po_numbers.json
 
 The bad fixture is expected to exit with code 2 and return needs_review. That is intentional: uncertain or inconsistent orders are quarantined instead of being written into Shopify/ERP.
+
+Quarantine semantics: `order_total` sums only fully clean lines. Lines with per-line exceptions move to `quarantined_lines` (with per-line `reasons`) and sum to `quarantined_total`, so a needs_review order never presents a spendable total that mixes good and bad lines.

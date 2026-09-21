@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 
-from opportunity_scanner.filters import MinimumEvidenceGate, ValidationBudgetGate
+from opportunity_scanner.filters import (
+    MinimumEvidenceGate,
+    ProhibitedGate,
+    ValidationBudgetGate,
+)
 from opportunity_scanner.scoring import OpportunityAxisScorer
 from opportunity_scanner.selector import ParetoLayerSelector
 from opportunity_scanner.source import JsonlOpportunitySource
@@ -86,6 +90,56 @@ def test_axis_scorer_separates_facts_and_priors():
     assert scores["feedback_speed"] == 0.5
     assert scores["safety"] == 0.8
     assert scores["feasibility_floor"] == 0.8
+
+
+def test_prohibited_gate_rejects_only_prohibited():
+    query = ResearchQuery()
+
+    def _payload(status: str) -> ResearchCandidate:
+        return ResearchCandidate(
+            candidate_id=status,
+            title=status,
+            source="test",
+            payload={"permission_status": status},
+        )
+
+    assert ProhibitedGate().keep(query, _payload("allowed"))
+    # authorized-only passes the gate: the experiment design (e.g. historical
+    # benchmark before live testing) must enforce the authorization boundary.
+    assert ProhibitedGate().keep(query, _payload("authorized-only"))
+    assert not ProhibitedGate().keep(query, _payload("prohibited"))
+
+
+def test_pareto_tie_break_prefers_lower_human_hours():
+    low_hours = _candidate(
+        "low-hours",
+        demand_strength=0.8,
+        evidence_quality=0.8,
+        automation_fit=0.8,
+        distribution_access=0.8,
+        cash_ease=0.8,
+        human_ease=0.9,
+        feedback_speed=0.8,
+        safety=0.8,
+        feasibility_floor=0.8,
+    )
+    high_hours = _candidate(
+        "high-hours",
+        demand_strength=0.8,
+        evidence_quality=0.8,
+        automation_fit=0.8,
+        distribution_access=0.8,
+        cash_ease=0.8,
+        human_ease=0.2,
+        feedback_speed=0.8,
+        safety=0.8,
+        feasibility_floor=0.8,
+    )
+    selected = ParetoLayerSelector().select(
+        ResearchQuery(limit=1),
+        [high_hours, low_hours],
+    )
+    assert [item.candidate_id for item in selected] == ["low-hours"]
 
 
 def test_pareto_selector_prefers_non_dominated_candidate():

@@ -6,7 +6,7 @@ from pathlib import Path
 from research_pipeline.models import ResearchQuery
 from research_pipeline.pipeline import ResearchPipeline
 
-from .filters import MinimumEvidenceGate, PermissionGate, ValidationBudgetGate
+from .filters import MinimumEvidenceGate, ProhibitedGate, ValidationBudgetGate
 from .report import render_markdown
 from .scoring import OpportunityAxisScorer
 from .selector import ParetoLayerSelector
@@ -32,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     pipeline = ResearchPipeline(
         sources=[JsonlOpportunitySource(args.input)],
         filters=[
-            PermissionGate(),
+            ProhibitedGate(),
             MinimumEvidenceGate(minimum=args.min_signals),
             ValidationBudgetGate(
                 max_cash_usd=args.max_cash,

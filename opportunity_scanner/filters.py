@@ -10,8 +10,14 @@ def _number(value: object, default: float = 0.0) -> float:
         return default
 
 
-class PermissionGate:
-    """Reject only opportunities explicitly marked as prohibited."""
+class ProhibitedGate:
+    """Reject only opportunities explicitly marked as prohibited.
+
+    ``allowed`` and ``authorized-only`` both pass this gate. An
+    ``authorized-only`` candidate must therefore carry an experiment design
+    that stays inside explicitly authorized scope (e.g. a historical benchmark
+    before any live testing) — the gate itself does not enforce that.
+    """
 
     name = "permission_gate"
 
@@ -19,6 +25,11 @@ class PermissionGate:
         del query
         status = str(candidate.payload.get("permission_status", "unknown")).lower()
         return status != "prohibited"
+
+
+# Deprecated alias kept for backward compatibility. Prefer ProhibitedGate,
+# whose name states what is actually rejected.
+PermissionGate = ProhibitedGate
 
 
 class MinimumEvidenceGate:

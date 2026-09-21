@@ -34,9 +34,14 @@ def validate_order(
 
     An LLM may extract fields upstream, but pricing, inventory, SKU validity,
     duplicates, and approval gates are decided by deterministic code.
+
+    Only fully clean lines contribute to ``normalized_lines``/``order_total``.
+    Lines with per-line exceptions are reported in ``quarantined_lines`` with
+    ``quarantined_total`` so a needs_review order never presents a spendable
+    total that mixes good and bad lines.
     """
 
-    seen_purchase_orders = seen_purchase_orders or set()
+    seen_purchase_orders = seen_purchase_orders if seen_purchase_orders is not None else set()
     exceptions: list[ExceptionItem] = []
 
     po_number = str(order.get("purchase_order_number") or "").strip()
@@ -58,26 +63,52 @@ def validate_order(
         lines = []
 
     normalized_lines: list[dict[str, Any]] = []
+    quarantined_lines: list[dict[str, Any]] = []
     total = Decimal("0")
+    quarantined_total = Decimal("0")
 
     for index, raw_line in enumerate(lines):
+        line_start = len(exceptions)
         sku = str(raw_line.get("sku") or "").strip()
         quantity = _decimal(raw_line.get("quantity"))
         unit_price = _decimal(raw_line.get("unit_price"))
 
+        def _quarantine_unpriced(code: str, message: str) -> None:
+            exceptions.append(ExceptionItem(code, message, index, sku or None))
+            quarantined_lines.append(
+                {
+                    "line_index": index,
+                    "sku": sku or None,
+                    "quantity": str(raw_line.get("quantity")),
+                    "unit_price": str(raw_line.get("unit_price")),
+                    "line_total": None,
+                    "reasons": [code],
+                }
+            )
+
         if not sku:
             exceptions.append(ExceptionItem("missing_sku", "SKU is required.", index))
+            quarantined_lines.append(
+                {
+                    "line_index": index,
+                    "sku": None,
+                    "quantity": str(raw_line.get("quantity")),
+                    "unit_price": str(raw_line.get("unit_price")),
+                    "line_total": None,
+                    "reasons": ["missing_sku"],
+                }
+            )
             continue
         if quantity is None or quantity <= 0 or quantity != quantity.to_integral_value():
-            exceptions.append(ExceptionItem("invalid_quantity", "Quantity must be a positive integer.", index, sku))
+            _quarantine_unpriced("invalid_quantity", "Quantity must be a positive integer.")
             continue
         if unit_price is None or unit_price < 0:
-            exceptions.append(ExceptionItem("invalid_price", "Unit price must be non-negative.", index, sku))
+            _quarantine_unpriced("invalid_price", "Unit price must be non-negative.")
             continue
 
         item = catalog.get(sku)
         if item is None:
-            exceptions.append(ExceptionItem("unknown_sku", f"SKU {sku} is not in the catalog.", index, sku))
+            _quarantine_unpriced("unknown_sku", f"SKU {sku} is not in the catalog.")
             continue
 
         expected_price = _decimal(item.get("price"))
@@ -108,15 +139,30 @@ def validate_order(
             )
 
         line_total = quantity * unit_price
-        total += line_total
-        normalized_lines.append(
-            {
-                "sku": sku,
-                "quantity": int(quantity),
-                "unit_price": str(unit_price),
-                "line_total": str(line_total),
-            }
-        )
+        reasons = [item.code for item in exceptions[line_start:]]
+        if reasons:
+            quarantined_total += line_total
+            quarantined_lines.append(
+                {
+                    "line_index": index,
+                    "sku": sku,
+                    "quantity": int(quantity),
+                    "unit_price": str(unit_price),
+                    "line_total": str(line_total),
+                    "reasons": reasons,
+                }
+            )
+        else:
+            total += line_total
+            normalized_lines.append(
+                {
+                    "line_index": index,
+                    "sku": sku,
+                    "quantity": int(quantity),
+                    "unit_price": str(unit_price),
+                    "line_total": str(line_total),
+                }
+            )
 
     return {
         "status": "ready_for_draft" if not exceptions else "needs_review",
@@ -124,7 +170,9 @@ def validate_order(
         "customer_id": customer_id or None,
         "currency": currency or None,
         "normalized_lines": normalized_lines,
+        "quarantined_lines": quarantined_lines,
         "order_total": str(total),
+        "quarantined_total": str(quarantined_total),
         "exceptions": [asdict(item) for item in exceptions],
     }
 
