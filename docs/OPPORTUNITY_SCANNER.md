@@ -49,7 +49,7 @@ Token issuance stays in the queue, but fee schedules are not proof of profitabil
 
 ## Run
 
-python -m opportunity_scanner --input examples/opportunities_2026-09-21.jsonl --limit 3 --max-cash 500 --max-hours 24 --output output/opportunity_scanner/latest.md
+uv run --locked --extra test python -m opportunity_scanner --input examples/opportunities_2026-09-21.jsonl --limit 3 --max-cash 500 --max-hours 24 --output output/opportunity_scanner/latest.md
 
 The default minimum independent revenue-signal count is two.
 
@@ -78,11 +78,11 @@ An LLM or document parser may extract fields upstream, but the final decision to
 
 Run a clean fixture:
 
-    python -m opportunity_scanner.order_intake_demo --order examples/order_intake/po_clean.json --catalog examples/order_intake/catalog.json
+    uv run --locked --extra test python -m opportunity_scanner.order_intake_demo --order examples/order_intake/po_clean.json --catalog examples/order_intake/catalog.json
 
 Run the exception fixture:
 
-    python -m opportunity_scanner.order_intake_demo --order examples/order_intake/po_bad.json --catalog examples/order_intake/catalog.json --seen-pos examples/order_intake/seen_po_numbers.json
+    uv run --locked --extra test python -m opportunity_scanner.order_intake_demo --order examples/order_intake/po_bad.json --catalog examples/order_intake/catalog.json --seen-pos examples/order_intake/seen_po_numbers.json
 
 The bad fixture is expected to exit with code 2 and return needs_review. That is intentional: uncertain or inconsistent orders are quarantined instead of being written into Shopify/ERP.
 
@@ -102,10 +102,10 @@ module (`PO:`/`Customer:`/`Currency:` headers, `SKU x QTY @ PRICE` lines).
 
 Run a clean email:
 
-    python -m opportunity_scanner.order_intake_email --email examples/order_intake/email_clean.txt --catalog examples/order_intake/catalog.json
+    uv run --locked --extra test python -m opportunity_scanner.order_intake_email --email examples/order_intake/email_clean.txt --catalog examples/order_intake/catalog.json
 
 Run the exception email:
 
-    python -m opportunity_scanner.order_intake_email --email examples/order_intake/email_bad.txt --catalog examples/order_intake/catalog.json
+    uv run --locked --extra test python -m opportunity_scanner.order_intake_email --email examples/order_intake/email_bad.txt --catalog examples/order_intake/catalog.json
 
 Quarantine semantics: `order_total` sums only fully clean lines. Lines with per-line exceptions move to `quarantined_lines` (with per-line `reasons`) and sum to `quarantined_total`, so a needs_review order never presents a spendable total that mixes good and bad lines.

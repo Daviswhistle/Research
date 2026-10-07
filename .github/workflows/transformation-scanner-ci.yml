@@ -10,6 +10,8 @@ on:
       - "research_pipeline/**"
       - "tests/**"
       - "pyproject.toml"
+      - "uv.lock"
+      - ".python-version"
       - ".github/workflows/transformation-scanner-ci.yml"
   pull_request:
     paths:
@@ -18,6 +20,8 @@ on:
       - "research_pipeline/**"
       - "tests/**"
       - "pyproject.toml"
+      - "uv.lock"
+      - ".python-version"
       - ".github/workflows/transformation-scanner-ci.yml"
 
 permissions:
@@ -29,13 +33,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Install pinned uv and Python
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          python-version: "3.11"
-          cache: pip
-      - name: Install package and test dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -e ".[test]"
+          version: "0.12.2"
+          python-version: "3.11.9"
+      - name: Sync locked environment
+        run: uv sync --locked --extra test
       - name: Compile package
-        run: python -m compileall -q transformation_scanner opportunity_scanner research_pipeline
+        run: uv run --locked --extra test python -m compileall -q transformation_scanner opportunity_scanner research_pipeline
       - name: Run tests
-        run: python -m pytest
+        run: uv run --locked --extra test python -m pytest

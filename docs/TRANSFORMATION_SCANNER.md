@@ -162,10 +162,10 @@ SQLite에 저장된 과거 사건과 현재 실행 중 먼저 처리된 사건�
 ## 실행
 
 ```bash
-python -m pip install -e ".[test]"
+uv sync --locked --extra test
 export DART_API_KEY="발급받은_인증키"
 
-python -m transformation_scanner \
+uv run --locked --extra test python -m transformation_scanner \
   --start 20251201 \
   --end 20251231 \
   --include-documents

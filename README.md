@@ -32,7 +32,7 @@ research queue
 
 실행 예:
 
-    python -m opportunity_scanner --input examples/opportunities_2026-09-21.jsonl --limit 3
+    uv run --locked --extra test python -m opportunity_scanner --input examples/opportunities_2026-09-21.jsonl --limit 3
 
 설계와 첫 스캔 근거는 docs/OPPORTUNITY_SCANNER.md를 참고하세요.
 
@@ -55,10 +55,10 @@ research queue
 
 ### 설치
 
+Python 3.11.9와 uv 0.12.2를 사용합니다. 저장소 루트에서 잠금 파일 기준으로 개발 의존성을 설치합니다.
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-python -m pip install -e ".[test]"
+uv sync --locked --extra test
 ```
 
 ### 실행
@@ -66,7 +66,7 @@ python -m pip install -e ".[test]"
 ```bash
 export DART_API_KEY="OpenDART_인증키"
 
-python -m transformation_scanner \
+uv run --locked --extra test python -m transformation_scanner \
   --start 20251201 \
   --end 20251231 \
   --include-documents
@@ -75,7 +75,7 @@ python -m transformation_scanner \
 또는 설치된 명령을 사용합니다.
 
 ```bash
-transformation-scanner --start 20251201 --end 20251231
+uv run --locked --extra test transformation-scanner --start 20251201 --end 20251231
 ```
 
 기본 산출물은 다음 위치에 저장됩니다.
@@ -90,7 +90,7 @@ output/transformation_scanner/
 과거 기간을 상태 저장 없이 다시 평가하려면 다음 옵션을 사용합니다.
 
 ```bash
-python -m transformation_scanner \
+uv run --locked --extra test python -m transformation_scanner \
   --start 20251201 \
   --end 20251231 \
   --include-documents \
@@ -103,8 +103,8 @@ python -m transformation_scanner \
 ### 테스트
 
 ```bash
-python -m compileall -q transformation_scanner research_pipeline
-python -m pytest
+uv run --locked --extra test python -m compileall -q transformation_scanner opportunity_scanner research_pipeline
+uv run --locked --extra test python -m pytest
 ```
 
 > 이 탐색기의 점수는 매수 신호가 아닙니다. 사람이 당일 원문과 자본구조를 먼저 읽어야 할 후보를 정렬하는 연구 우선순위입니다.
