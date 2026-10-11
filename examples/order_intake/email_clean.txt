@@ -1,0 +1,10 @@
+Hi team,
+
+PO: PO-1002
+Customer: CUST-42
+Currency: USD
+
+SKU-A x 10 @ 12.50
+SKU-B x 2 @ 9.00
+
+Thanks!

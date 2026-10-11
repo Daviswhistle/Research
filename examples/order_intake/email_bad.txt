@@ -1,0 +1,10 @@
+Hi, urgent order:
+
+PO: PO-1003
+Customer: CUST-42
+
+SKU-A x 3 @ 12.50
+SKU-A x two @ 12.50
+Please expedite, call me to confirm!!!
+
+Thanks
