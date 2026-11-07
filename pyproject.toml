@@ -24,7 +24,7 @@ transformation-scanner = "transformation_scanner.cli:main"
 opportunity-scanner = "opportunity_scanner.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["transformation_scanner*", "research_pipeline*", "opportunity_scanner*"]
+include = ["transformation_scanner*", "research_pipeline*", "opportunity_scanner*", "deepseek_offload*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
